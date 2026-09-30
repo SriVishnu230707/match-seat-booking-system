@@ -1,0 +1,69 @@
+const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
+const { openDatabase, listMatches, listSeats, reserveSeat } = require('./db');
+
+const db = openDatabase();
+const publicDir = path.join(__dirname, 'public');
+
+function sendJson(res, status, body) {
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify(body));
+}
+
+function readJson(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk;
+      if (body.length > 10_000) { reject(new Error('Request is too large.')); req.destroy(); }
+    });
+    req.on('end', () => {
+      try { resolve(JSON.parse(body)); } catch { reject(new Error('Invalid JSON.')); }
+    });
+    req.on('error', reject);
+  });
+}
+
+const server = http.createServer(async (req, res) => {
+  try {
+    const url = new URL(req.url, 'http://localhost');
+    if (req.method === 'GET' && url.pathname === '/api/matches') return sendJson(res, 200, { matches: listMatches(db) });
+    const seatsRoute = url.pathname.match(/^\/api\/matches\/(\d+)\/seats$/);
+    if (req.method === 'GET' && seatsRoute) {
+      const seats = listSeats(db, Number(seatsRoute[1]));
+      return seats ? sendJson(res, 200, { seats }) : sendJson(res, 404, { error: 'Match not found.' });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/reservations') {
+      if (!req.headers['content-type']?.startsWith('application/json')) return sendJson(res, 415, { error: 'Send JSON.' });
+      const body = await readJson(req);
+      const matchId = Number(body.matchId);
+      const seatId = Number(body.seatId);
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+      if (!Number.isSafeInteger(matchId) || matchId < 1 || !Number.isSafeInteger(seatId) || seatId < 1 || !name || name.length > 100 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
+        return sendJson(res, 400, { error: 'Enter a valid seat, name, and email.' });
+      }
+      const result = reserveSeat(db, { matchId, seatId, name, email });
+      return sendJson(res, result.status, result.reservation ? { reservation: result.reservation } : { error: result.error });
+    }
+    if (req.method === 'GET' && ['/', '/app.js', '/styles.css'].includes(url.pathname)) {
+      const filename = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
+      const types = { 'index.html': 'text/html', 'app.js': 'text/javascript', 'styles.css': 'text/css' };
+      res.writeHead(200, { 'Content-Type': `${types[filename]}; charset=utf-8` });
+      return fs.createReadStream(path.join(publicDir, filename)).pipe(res);
+    }
+    return sendJson(res, 404, { error: 'Not found.' });
+  } catch (error) {
+    if (error.message === 'Invalid JSON.' || error.message === 'Request is too large.') return sendJson(res, 400, { error: error.message });
+    console.error(error);
+    if (!res.headersSent) sendJson(res, 500, { error: 'Server error.' });
+  }
+});
+
+if (require.main === module) {
+  const port = Number(process.env.PORT) || 3000;
+  server.listen(port, () => console.log(`Open http://localhost:${port}`));
+}
+
+module.exports = { server };
