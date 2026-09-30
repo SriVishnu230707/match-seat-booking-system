@@ -3,6 +3,19 @@ const { createClient } = require('redis');
 const TTL_SECONDS = 30;
 const MATCHES_KEY = 'matches:list';
 const seatsKey = matchId => `matches:${matchId}:seats`;
+const versionKey = key => `${key}:version`;
+const FILL_IF_UNCHANGED = `
+  if (redis.call('GET', KEYS[2]) or '') ~= ARGV[1] then return 0 end
+  redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+  return 1
+`;
+const INVALIDATE = `
+  redis.call('INCR', KEYS[1])
+  redis.call('DEL', KEYS[2])
+  redis.call('INCR', KEYS[3])
+  redis.call('DEL', KEYS[4])
+  return 1
+`;
 
 async function connectCache() {
   const client = createClient({
@@ -23,9 +36,11 @@ async function connectCache() {
 
 async function getOrLoad(client, key, load) {
   if (!client?.isReady) return { value: load(), cache: 'BYPASS' };
+  let version;
   try {
     const cached = await client.get(key);
     if (cached !== null) return { value: JSON.parse(cached), cache: 'HIT' };
+    version = (await client.get(versionKey(key))) || '';
   } catch (error) {
     console.warn(`Redis read failed for ${key}: ${error.message}`);
     return { value: load(), cache: 'BYPASS' };
@@ -33,7 +48,14 @@ async function getOrLoad(client, key, load) {
   const value = load();
   // A missing match is not useful to cache: it may be created later.
   if (value !== null) {
-    try { await client.set(key, JSON.stringify(value), { EX: TTL_SECONDS }); }
+    try {
+      const written = await client.eval(FILL_IF_UNCHANGED, {
+        keys: [key, versionKey(key)], arguments: [version, JSON.stringify(value), String(TTL_SECONDS)]
+      });
+      // A booking invalidated the key while SQLite was being read. Reload instead
+      // of returning the now-stale value; a later request can refill the cache.
+      if (!written) return { value: load(), cache: 'BYPASS' };
+    }
     catch (error) { console.warn(`Redis write failed for ${key}: ${error.message}`); }
   }
   return { value, cache: 'MISS' };
@@ -41,7 +63,10 @@ async function getOrLoad(client, key, load) {
 
 async function invalidateAvailability(client, matchId) {
   if (!client?.isReady) return;
-  try { await client.del([MATCHES_KEY, seatsKey(matchId)]); }
+  const seatKey = seatsKey(matchId);
+  try {
+    await client.eval(INVALIDATE, { keys: [versionKey(MATCHES_KEY), MATCHES_KEY, versionKey(seatKey), seatKey], arguments: [] });
+  }
   catch (error) { console.warn(`Redis invalidation failed: ${error.message}`); }
 }
 

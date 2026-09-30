@@ -8,8 +8,19 @@ function fakeRedis() {
     isReady: true,
     values,
     async get(key) { return values.has(key) ? values.get(key) : null; },
-    async set(key, value, options) { assert.deepEqual(options, { EX: TTL_SECONDS }); values.set(key, value); },
-    async del(keys) { for (const key of keys) values.delete(key); }
+    async eval(_script, { keys, arguments: args }) {
+      if (keys.length === 2) {
+        assert.equal(args[2], String(TTL_SECONDS));
+        if ((values.get(keys[1]) || '') !== args[0]) return 0;
+        values.set(keys[0], args[1]);
+        return 1;
+      }
+      for (let index = 0; index < keys.length; index += 2) {
+        values.set(keys[index], String(Number(values.get(keys[index]) || 0) + 1));
+        values.delete(keys[index + 1]);
+      }
+      return 1;
+    }
   };
 }
 
@@ -36,4 +47,21 @@ test('successful booking invalidation forces refreshed availability', async () =
 
 test('SQLite loader remains usable when Redis is unavailable', async () => {
   assert.deepEqual(await getOrLoad(null, MATCHES_KEY, () => [1]), { value: [1], cache: 'BYPASS' });
+});
+
+test('a delayed cache fill cannot restore stale availability after a booking', async () => {
+  const redis = fakeRedis();
+  let available = 80;
+  let reads = 0;
+  const result = await getOrLoad(redis, MATCHES_KEY, () => {
+    reads++;
+    const old = [{ available_seats: available }];
+    if (reads === 1) {
+      available = 79;
+      void invalidateAvailability(redis, 1);
+    }
+    return old;
+  });
+  assert.deepEqual(result, { value: [{ available_seats: 79 }], cache: 'BYPASS' });
+  assert.equal(redis.values.has(MATCHES_KEY), false);
 });

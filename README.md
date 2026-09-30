@@ -28,6 +28,7 @@ Node 22 may print an experimental warning for its built-in SQLite module.
 - `GET /api/matches/:id/seats` caches its result at `matches:<id>:seats`.
 - Both keys expire after 30 seconds (`SET ... EX 30`).
 - A successful reservation is saved in SQLite first, then deletes both affected cache keys (`DEL`).
+- A version check prevents an older in-flight read from repopulating a key after booking invalidation.
 - Read responses include `X-Cache: MISS`, `HIT`, or `BYPASS` so you can observe the behavior.
 
 Try the cache manually:
