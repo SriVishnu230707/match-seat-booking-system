@@ -13,7 +13,7 @@
     <section class="panel" aria-labelledby="matches-title"><div class="heading"><h2 id="matches-title">Upcoming matches</h2><span id="match-count"></span></div><div id="matches" class="matches"></div></section>
     <section class="panel" aria-labelledby="seats-title"><div class="heading"><div><h2 id="seats-title">Choose a seat</h2><p id="match-description" class="muted">Select a match to see its seats.</p></div><div class="legend"><span class="dot"></span> Available <span class="dot taken"></span> Reserved</div></div><div id="seats" class="seats"></div></section>
     <section class="panel booking" aria-labelledby="booking-title"><h2 id="booking-title">Your reservation</h2><p id="selection" class="muted">Select a seat to continue.</p><form id="booking-form"><label>Your name<input name="name" autocomplete="name" maxlength="100" required></label><label>Email address<input name="email" type="email" autocomplete="email" maxlength="254" required></label><button id="book-button" type="submit" disabled>Reserve seat</button></form><p id="message" role="status" aria-live="polite"></p></section>
-    <footer>Phase 1 · Reservations are stored in SQLite. Redis features come next.</footer>
+    <footer>Phase 2 · SQLite stores reservations. Redis caches match and seat availability.</footer>
   </main>
 </body>
 </html>

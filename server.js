@@ -2,12 +2,14 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const { openDatabase, listMatches, listSeats, reserveSeat } = require('./db');
+const { connectCache, getOrLoad, invalidateAvailability, MATCHES_KEY, seatsKey } = require('./cache');
 
 const db = openDatabase();
 const publicDir = path.join(__dirname, 'public');
+let cache = null;
 
-function sendJson(res, status, body) {
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+function sendJson(res, status, body, cacheStatus) {
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...(cacheStatus ? { 'X-Cache': cacheStatus } : {}) });
   res.end(JSON.stringify(body));
 }
 
@@ -28,11 +30,14 @@ function readJson(req) {
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://localhost');
-    if (req.method === 'GET' && url.pathname === '/api/matches') return sendJson(res, 200, { matches: listMatches(db) });
+    if (req.method === 'GET' && url.pathname === '/api/matches') {
+      const result = await getOrLoad(cache, MATCHES_KEY, () => listMatches(db));
+      return sendJson(res, 200, { matches: result.value }, result.cache);
+    }
     const seatsRoute = url.pathname.match(/^\/api\/matches\/(\d+)\/seats$/);
     if (req.method === 'GET' && seatsRoute) {
-      const seats = listSeats(db, Number(seatsRoute[1]));
-      return seats ? sendJson(res, 200, { seats }) : sendJson(res, 404, { error: 'Match not found.' });
+      const result = await getOrLoad(cache, seatsKey(Number(seatsRoute[1])), () => listSeats(db, Number(seatsRoute[1])));
+      return result.value ? sendJson(res, 200, { seats: result.value }, result.cache) : sendJson(res, 404, { error: 'Match not found.' }, result.cache);
     }
     if (req.method === 'POST' && url.pathname === '/api/reservations') {
       if (!req.headers['content-type']?.startsWith('application/json')) return sendJson(res, 415, { error: 'Send JSON.' });
@@ -45,6 +50,7 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 400, { error: 'Enter a valid seat, name, and email.' });
       }
       const result = reserveSeat(db, { matchId, seatId, name, email });
+      if (result.status === 201) await invalidateAvailability(cache, matchId);
       return sendJson(res, result.status, result.reservation ? { reservation: result.reservation } : { error: result.error });
     }
     if (req.method === 'GET' && ['/', '/app.js', '/styles.css'].includes(url.pathname)) {
@@ -63,7 +69,10 @@ const server = http.createServer(async (req, res) => {
 
 if (require.main === module) {
   const port = Number(process.env.PORT) || 3000;
-  server.listen(port, () => console.log(`Open http://localhost:${port}`));
+  connectCache().then(client => {
+    cache = client;
+    server.listen(port, () => console.log(`Open http://localhost:${port}`));
+  }).catch(error => { console.error(error); process.exitCode = 1; });
 }
 
 module.exports = { server };
