@@ -65,3 +65,12 @@ test('a delayed cache fill cannot restore stale availability after a booking', a
   assert.deepEqual(result, { value: [{ available_seats: 79 }], cache: 'BYPASS' });
   assert.equal(redis.values.has(MATCHES_KEY), false);
 });
+
+test('failed invalidation disables the cache instead of serving old availability', async () => {
+  const redis = fakeRedis();
+  await getOrLoad(redis, MATCHES_KEY, () => [{ available_seats: 80 }]);
+  redis.eval = async () => { throw new Error('connection lost'); };
+  redis.destroy = () => { redis.isReady = false; };
+  await invalidateAvailability(redis, 1);
+  assert.equal((await getOrLoad(redis, MATCHES_KEY, () => [{ available_seats: 79 }])).cache, 'BYPASS');
+});

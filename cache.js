@@ -62,12 +62,19 @@ async function getOrLoad(client, key, load) {
 }
 
 async function invalidateAvailability(client, matchId) {
-  if (!client?.isReady) return;
+  if (!client) return;
+  if (!client.isReady) {
+    client.destroy();
+    return;
+  }
   const seatKey = seatsKey(matchId);
   try {
     await client.eval(INVALIDATE, { keys: [versionKey(MATCHES_KEY), MATCHES_KEY, versionKey(seatKey), seatKey], arguments: [] });
   }
-  catch (error) { console.warn(`Redis invalidation failed: ${error.message}`); }
+  catch (error) {
+    console.warn(`Redis invalidation failed; bypassing cache until restart: ${error.message}`);
+    client.destroy();
+  }
 }
 
 module.exports = { connectCache, getOrLoad, invalidateAvailability, MATCHES_KEY, seatsKey, TTL_SECONDS };
