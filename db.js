@@ -43,11 +43,21 @@ function openDatabase(filename = path.join(__dirname, 'data', 'bookings.sqlite')
       BEGIN SELECT RAISE(ABORT, 'Seat does not belong to match'); END;
   `);
   if (db.prepare('SELECT COUNT(*) AS count FROM matches').get().count === 0) {
-    const insertMatch = db.prepare('INSERT INTO matches (home_team, away_team, venue, starts_at) VALUES (?, ?, ?, ?)');
-    const insertSeat = db.prepare('INSERT INTO seats (match_id, section, row_label, seat_number, price) VALUES (?, ?, ?, ?, ?)');
-    const matchId = Number(insertMatch.run('India', 'Australia', 'Wankhede Stadium, Mumbai', '2026-11-15T19:00:00+05:30').lastInsertRowid);
-    for (const [section, price, rows] of [['North Stand', 1200, ['A', 'B', 'C']], ['East Stand', 1800, ['A', 'B', 'C']], ['Pavilion', 3500, ['A', 'B']]]) {
-      for (const row of rows) for (let number = 1; number <= 10; number++) insertSeat.run(matchId, section, row, number, price);
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      // Check again inside the transaction if another process seeded first.
+      if (db.prepare('SELECT COUNT(*) AS count FROM matches').get().count === 0) {
+        const insertMatch = db.prepare('INSERT INTO matches (home_team, away_team, venue, starts_at) VALUES (?, ?, ?, ?)');
+        const insertSeat = db.prepare('INSERT INTO seats (match_id, section, row_label, seat_number, price) VALUES (?, ?, ?, ?, ?)');
+        const matchId = Number(insertMatch.run('India', 'Australia', 'Wankhede Stadium, Mumbai', '2026-11-15T19:00:00+05:30').lastInsertRowid);
+        for (const [section, price, rows] of [['North Stand', 1200, ['A', 'B', 'C']], ['East Stand', 1800, ['A', 'B', 'C']], ['Pavilion', 3500, ['A', 'B']]]) {
+          for (const row of rows) for (let number = 1; number <= 10; number++) insertSeat.run(matchId, section, row, number, price);
+        }
+      }
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
     }
   }
   return db;
