@@ -5,6 +5,7 @@ const messageEl = document.querySelector('#message');
 let matches = [];
 let currentMatch = null;
 let selectedSeat = null;
+let seatLoadId = 0;
 
 const money = amount => `₹${Number(amount).toLocaleString('en-IN')}`;
 function message(text, kind = '') { messageEl.textContent = text; messageEl.className = kind; }
@@ -31,10 +32,12 @@ async function loadMatches() {
       matchesEl.append(button);
     }
     if (!currentMatch && matches.length) await chooseMatch(matches[0]);
-  } catch (error) { message(error.message, 'error'); }
+    return true;
+  } catch (error) { message(error.message, 'error'); return false; }
 }
 
 async function chooseMatch(match) {
+  const requestId = ++seatLoadId;
   currentMatch = match;
   selectedSeat = null;
   document.querySelector('#book-button').disabled = true;
@@ -45,6 +48,7 @@ async function chooseMatch(match) {
   seatsEl.textContent = 'Loading seats…';
   try {
     const { seats } = await api(`/api/matches/${match.id}/seats`);
+    if (requestId !== seatLoadId) return false;
     seatsEl.replaceChildren();
     for (const sectionName of [...new Set(seats.map(seat => seat.section))]) {
       const section = document.createElement('div');
@@ -72,7 +76,13 @@ async function chooseMatch(match) {
       section.append(title, grid);
       seatsEl.append(section);
     }
-  } catch (error) { seatsEl.textContent = ''; message(error.message, 'error'); }
+    return true;
+  } catch (error) {
+    if (requestId !== seatLoadId) return false;
+    seatsEl.textContent = '';
+    message(error.message, 'error');
+    return false;
+  }
 }
 
 form.addEventListener('submit', async event => {
@@ -83,16 +93,14 @@ form.addEventListener('submit', async event => {
   const body = { matchId: currentMatch.id, seatId: selectedSeat.id, name: form.elements.name.value, email: form.elements.email.value };
   try {
     const { reservation } = await api('/api/reservations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    message(`Booked! Reservation #${reservation.id}: ${reservation.section} ${reservation.row_label}${reservation.seat_number}.`, 'success');
+    const confirmation = `Booked! Reservation #${reservation.id}: ${reservation.section} ${reservation.row_label}${reservation.seat_number}.`;
     selectedSeat = null;
     document.querySelector('#selection').textContent = 'Select another seat to continue.';
-    const match = currentMatch;
-    currentMatch = null;
-    await loadMatches();
-    await chooseMatch(match);
-    message(`Booked! Reservation #${reservation.id}: ${reservation.section} ${reservation.row_label}${reservation.seat_number}.`, 'success');
+    form.reset();
+    const seatRefreshOk = await chooseMatch(currentMatch);
+    const matchesRefreshOk = await loadMatches();
+    message(seatRefreshOk && matchesRefreshOk ? confirmation : `${confirmation} Availability could not be refreshed; reload the page.`, 'success');
   } catch (error) {
-    message(error.message, 'error');
     button.disabled = false;
     await chooseMatch(currentMatch);
     message(error.message, 'error');
