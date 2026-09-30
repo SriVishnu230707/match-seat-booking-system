@@ -16,11 +16,15 @@ function sendJson(res, status, body, cacheStatus) {
 function readJson(req) {
   return new Promise((resolve, reject) => {
     let body = '';
+    let bytes = 0;
+    let tooLarge = false;
     req.on('data', chunk => {
+      bytes += chunk.length;
+      if (bytes > 10_000) { tooLarge = true; return; }
       body += chunk;
-      if (body.length > 10_000) { reject(new Error('Request is too large.')); req.destroy(); }
     });
     req.on('end', () => {
+      if (tooLarge) return reject(Object.assign(new Error('Request is too large.'), { status: 413 }));
       try { resolve(JSON.parse(body)); } catch { reject(new Error('Invalid JSON.')); }
     });
     req.on('error', reject);
@@ -40,10 +44,10 @@ const server = http.createServer(async (req, res) => {
       return result.value ? sendJson(res, 200, { seats: result.value }, result.cache) : sendJson(res, 404, { error: 'Match not found.' }, result.cache);
     }
     if (req.method === 'POST' && url.pathname === '/api/reservations') {
-      if (!req.headers['content-type']?.startsWith('application/json')) return sendJson(res, 415, { error: 'Send JSON.' });
+      if (!/^application\/json(?:\s*;|\s*$)/i.test(req.headers['content-type'] || '')) return sendJson(res, 415, { error: 'Send JSON.' });
       const body = await readJson(req);
-      const matchId = Number(body.matchId);
-      const seatId = Number(body.seatId);
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return sendJson(res, 400, { error: 'Enter a valid seat, name, and email.' });
+      const { matchId, seatId } = body;
       const name = typeof body.name === 'string' ? body.name.trim() : '';
       const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
       if (!Number.isSafeInteger(matchId) || matchId < 1 || !Number.isSafeInteger(seatId) || seatId < 1 || !name || name.length > 100 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
@@ -61,7 +65,7 @@ const server = http.createServer(async (req, res) => {
     }
     return sendJson(res, 404, { error: 'Not found.' });
   } catch (error) {
-    if (error.message === 'Invalid JSON.' || error.message === 'Request is too large.') return sendJson(res, 400, { error: error.message });
+    if (error.message === 'Invalid JSON.' || error.status === 413) return sendJson(res, error.status || 400, { error: error.message });
     console.error(error);
     if (!res.headersSent) sendJson(res, 500, { error: 'Server error.' });
   }
