@@ -21,5 +21,8 @@ test('a seat cannot be reserved under a different match', () => {
   const db = openDatabase(':memory:');
   const seat = listSeats(db, 1)[0];
   assert.equal(reserveSeat(db, { matchId: 999, seatId: seat.id, name: 'Asha', email: 'asha@example.com' }).status, 404);
+  db.prepare('INSERT INTO matches (home_team, away_team, venue, starts_at) VALUES (?, ?, ?, ?)').run('A', 'B', 'Test', '2026-12-01');
+  assert.throws(() => db.prepare('INSERT INTO reservations (match_id, seat_id, customer_name, customer_email) VALUES (?, ?, ?, ?)')
+    .run(2, seat.id, 'Asha', 'asha@example.com'), /Seat does not belong to match/);
   db.close();
 });

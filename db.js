@@ -32,6 +32,15 @@ function openDatabase(filename = path.join(__dirname, 'data', 'bookings.sqlite')
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       UNIQUE(match_id, seat_id)
     );
+    CREATE UNIQUE INDEX IF NOT EXISTS reservations_one_per_seat ON reservations(seat_id);
+    CREATE TRIGGER IF NOT EXISTS reservations_match_insert
+      BEFORE INSERT ON reservations
+      WHEN NOT EXISTS (SELECT 1 FROM seats WHERE id = NEW.seat_id AND match_id = NEW.match_id)
+      BEGIN SELECT RAISE(ABORT, 'Seat does not belong to match'); END;
+    CREATE TRIGGER IF NOT EXISTS reservations_match_update
+      BEFORE UPDATE OF match_id, seat_id ON reservations
+      WHEN NOT EXISTS (SELECT 1 FROM seats WHERE id = NEW.seat_id AND match_id = NEW.match_id)
+      BEGIN SELECT RAISE(ABORT, 'Seat does not belong to match'); END;
   `);
   if (db.prepare('SELECT COUNT(*) AS count FROM matches').get().count === 0) {
     const insertMatch = db.prepare('INSERT INTO matches (home_team, away_team, venue, starts_at) VALUES (?, ?, ?, ?)');
@@ -71,7 +80,7 @@ function reserveSeat(db, { matchId, seatId, name, email }) {
       FROM reservations r JOIN seats s ON s.id = r.seat_id JOIN matches m ON m.id = r.match_id WHERE r.id = ?`)
       .get(Number(result.lastInsertRowid)) };
   } catch (error) {
-    if (error.code === 'ERR_SQLITE_ERROR' && error.message.includes('UNIQUE constraint failed: reservations.match_id, reservations.seat_id')) return { status: 409, error: 'This seat has already been reserved.' };
+    if (error.code === 'ERR_SQLITE_ERROR' && error.message.startsWith('UNIQUE constraint failed: reservations.')) return { status: 409, error: 'This seat has already been reserved.' };
     throw error;
   }
 }
