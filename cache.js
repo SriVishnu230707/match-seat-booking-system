@@ -1,6 +1,12 @@
 const { createClient } = require('redis');
 
-const TTL_SECONDS = 30;
+function cacheTtlSeconds(raw = process.env.CACHE_TTL_SECONDS) {
+  if (raw === undefined) return 30;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1 || value > 3600) throw new Error('CACHE_TTL_SECONDS must be an integer from 1 to 3600.');
+  return value;
+}
+const TTL_SECONDS = cacheTtlSeconds();
 const MATCHES_KEY = 'matches:list';
 const seatsKey = matchId => `matches:${matchId}:seats`;
 const versionKey = key => `${key}:version`;
@@ -77,4 +83,4 @@ async function invalidateAvailability(client, matchId) {
   }
 }
 
-module.exports = { connectCache, getOrLoad, invalidateAvailability, MATCHES_KEY, seatsKey, TTL_SECONDS };
+module.exports = { connectCache, getOrLoad, invalidateAvailability, MATCHES_KEY, seatsKey, TTL_SECONDS, cacheTtlSeconds };

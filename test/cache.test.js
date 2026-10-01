@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { getOrLoad, invalidateAvailability, MATCHES_KEY, seatsKey, TTL_SECONDS } = require('../cache');
+const { getOrLoad, invalidateAvailability, MATCHES_KEY, seatsKey, TTL_SECONDS, cacheTtlSeconds } = require('../cache');
 
 function fakeRedis() {
   const values = new Map();
@@ -47,6 +47,12 @@ test('successful booking invalidation forces refreshed availability', async () =
 
 test('SQLite loader remains usable when Redis is unavailable', async () => {
   assert.deepEqual(await getOrLoad(null, MATCHES_KEY, () => [1]), { value: [1], cache: 'BYPASS' });
+});
+
+test('cache lifetime accepts only a positive bounded whole number', () => {
+  assert.equal(cacheTtlSeconds(undefined), 30);
+  assert.equal(cacheTtlSeconds('10'), 10);
+  for (const value of ['0', '-1', '1.5', 'nope', '3601']) assert.throws(() => cacheTtlSeconds(value));
 });
 
 test('a delayed cache fill cannot restore stale availability after a booking', async () => {

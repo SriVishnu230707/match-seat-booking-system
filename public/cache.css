@@ -1,0 +1,7 @@
+.cache-lab { display: flex; align-items: center; justify-content: space-between; gap: 18px; flex-wrap: wrap; margin-top: 18px; padding: 16px; border-radius: 12px; background: #f4f9f5; border: 1px solid #dcebe0; }
+.cache-lab p { margin: 5px 0 10px; color: #5d7364; font-size: 14px; }
+.cache-lab small { display: block; margin-top: 10px; color: #647a69; }
+.cache-badges { display: flex; flex-wrap: wrap; gap: 8px; }
+.cache-badges span { border: 1px solid #c7ddcd; border-radius: 999px; background: white; padding: 5px 10px; font-size: 12px; font-weight: 750; }
+.cache-lab button { border: 1px solid #207b4d; border-radius: 9px; background: white; color: #17613b; padding: 10px 14px; font: inherit; font-weight: 700; cursor: pointer; }
+.cache-lab button:disabled { opacity: .5; cursor: wait; }

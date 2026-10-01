@@ -14,7 +14,7 @@ npm start
 
 If the container already exists, use `docker start redis` instead of `docker run`. Open <http://localhost:3000>. The app creates `data/bookings.sqlite` and seeds one fictional match with 80 seats on first run.
 
-If Redis is unavailable at startup, the app still serves reads from SQLite. Start Redis and restart the app to enable caching. Set `REDIS_URL` if Redis is not at `redis://localhost:6379`.
+If Redis is unavailable at startup, the app still serves reads from SQLite. Start Redis and restart the app to enable caching. Set `REDIS_URL` if Redis is not at `redis://localhost:6379`. Set `CACHE_TTL_SECONDS` to a whole number from 1 to 3600 to change the cache lifetime (default: 30).
 
 ```powershell
 npm test
@@ -31,6 +31,7 @@ Node 22 may print an experimental warning for its built-in SQLite module.
 - A version check prevents an older in-flight read from repopulating a key after booking invalidation.
 - If invalidation fails, this app instance bypasses Redis until restart. Existing keys still have a 30-second maximum lifetime.
 - Read responses include `X-Cache: MISS`, `HIT`, or `BYPASS` so you can observe the behavior.
+- Read responses also include `X-Cache-TTL-Seconds`. The page shows both cache states and lets you repeat the availability request with **Check availability again**. This button does not skip Redis; a hit is expected while the key is alive.
 
 Try the cache manually:
 
@@ -42,6 +43,15 @@ GET matches:1:seats
 ```
 
 Visit or refresh the app before running `GET`: the app fills each key on the first request. Reserve a seat and check that the keys disappear. The next read fills them with updated availability.
+
+For a quick experiment, start the app with a 10-second lifetime:
+
+```powershell
+$env:CACHE_TTL_SECONDS = '10'
+npm start
+```
+
+Click **Check availability again** twice, wait 10 seconds, then click again. The page should show `MISS`, `HIT`, then `MISS` when Redis is running.
 
 ## Booking features
 

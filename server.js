@@ -2,14 +2,14 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const { openDatabase, listMatches, listSeats, reserveSeat } = require('./db');
-const { connectCache, getOrLoad, invalidateAvailability, MATCHES_KEY, seatsKey } = require('./cache');
+const { connectCache, getOrLoad, invalidateAvailability, MATCHES_KEY, seatsKey, TTL_SECONDS } = require('./cache');
 
 const db = openDatabase();
 const publicDir = path.join(__dirname, 'public');
 let cache = null;
 
 function sendJson(res, status, body, cacheStatus) {
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...(cacheStatus ? { 'X-Cache': cacheStatus } : {}) });
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...(cacheStatus ? { 'X-Cache': cacheStatus, 'X-Cache-TTL-Seconds': String(TTL_SECONDS) } : {}) });
   res.end(JSON.stringify(body));
 }
 
@@ -57,9 +57,9 @@ const server = http.createServer(async (req, res) => {
       if (result.status === 201) await invalidateAvailability(cache, matchId);
       return sendJson(res, result.status, result.reservation ? { reservation: result.reservation } : { error: result.error });
     }
-    if (req.method === 'GET' && ['/', '/app.js', '/styles.css'].includes(url.pathname)) {
+    if (req.method === 'GET' && ['/', '/app.js', '/styles.css', '/cache.css'].includes(url.pathname)) {
       const filename = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
-      const types = { 'index.html': 'text/html', 'app.js': 'text/javascript', 'styles.css': 'text/css' };
+      const types = { 'index.html': 'text/html', 'app.js': 'text/javascript', 'styles.css': 'text/css', 'cache.css': 'text/css' };
       res.writeHead(200, { 'Content-Type': `${types[filename]}; charset=utf-8` });
       return fs.createReadStream(path.join(publicDir, filename)).pipe(res);
     }

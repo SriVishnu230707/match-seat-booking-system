@@ -15,3 +15,19 @@ test('reservation API returns client errors for malformed bodies', async () => {
     await new Promise(resolve => server.close(resolve));
   }
 });
+
+test('availability responses expose cache state and configured lifetime', async () => {
+  await new Promise(resolve => server.listen(0, resolve));
+  try {
+    const origin = `http://localhost:${server.address().port}`;
+    const response = await fetch(`${origin}/api/matches`);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('x-cache'), 'BYPASS');
+    assert.equal(response.headers.get('x-cache-ttl-seconds'), '30');
+    const stylesheet = await fetch(`${origin}/cache.css`);
+    assert.equal(stylesheet.status, 200);
+    assert.match(stylesheet.headers.get('content-type'), /text\/css/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+});

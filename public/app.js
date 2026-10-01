@@ -2,6 +2,7 @@ const matchesEl = document.querySelector('#matches');
 const seatsEl = document.querySelector('#seats');
 const form = document.querySelector('#booking-form');
 const messageEl = document.querySelector('#message');
+const refreshButton = document.querySelector('#refresh-button');
 let matches = [];
 let currentMatch = null;
 let selectedSeat = null;
@@ -9,8 +10,17 @@ let seatLoadId = 0;
 
 const money = amount => `₹${Number(amount).toLocaleString('en-IN')}`;
 function message(text, kind = '') { messageEl.textContent = text; messageEl.className = kind; }
-async function api(url, options) {
+function showCache(label, response) {
+  const status = response.headers.get('x-cache');
+  if (!status) return;
+  document.querySelector(label).textContent = `${label === '#match-cache' ? 'Matches' : 'Seats'}: ${status}`;
+  const ttl = response.headers.get('x-cache-ttl-seconds');
+  if (ttl) document.querySelector('#cache-explanation').textContent = `HIT = Redis · MISS = SQLite, then cached · BYPASS = SQLite without Redis · TTL = ${ttl}s`;
+}
+async function api(url, options, cacheLabel) {
   const response = await fetch(url, options);
+  if (typeof cacheLabel === 'function') cacheLabel(response);
+  else if (cacheLabel) showCache(cacheLabel, response);
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || 'Something went wrong.');
   return data;
@@ -18,7 +28,7 @@ async function api(url, options) {
 
 async function loadMatches() {
   try {
-    matches = (await api('/api/matches')).matches;
+    matches = (await api('/api/matches', undefined, '#match-cache')).matches;
     document.querySelector('#match-count').textContent = `${matches.length} match${matches.length === 1 ? '' : 'es'}`;
     matchesEl.replaceChildren();
     for (const match of matches) {
@@ -47,7 +57,9 @@ async function chooseMatch(match) {
   for (const button of matchesEl.children) button.classList.toggle('selected', button.children[1].textContent === `${match.home_team} vs ${match.away_team}`);
   seatsEl.textContent = 'Loading seats…';
   try {
-    const { seats } = await api(`/api/matches/${match.id}/seats`);
+    const { seats } = await api(`/api/matches/${match.id}/seats`, undefined, response => {
+      if (requestId === seatLoadId) showCache('#seat-cache', response);
+    });
     if (requestId !== seatLoadId) return false;
     seatsEl.replaceChildren();
     for (const sectionName of [...new Set(seats.map(seat => seat.section))]) {
@@ -104,6 +116,18 @@ form.addEventListener('submit', async event => {
     button.disabled = false;
     await chooseMatch(currentMatch);
     message(error.message, 'error');
+  }
+});
+
+refreshButton.addEventListener('click', async () => {
+  refreshButton.disabled = true;
+  try {
+    const matchOk = await loadMatches();
+    const latestMatch = matches.find(match => match.id === currentMatch?.id) || currentMatch;
+    const seatsOk = latestMatch ? await chooseMatch(latestMatch) : true;
+    if (!matchOk || !seatsOk) message('Availability could not be refreshed. Please try again.', 'error');
+  } finally {
+    refreshButton.disabled = false;
   }
 });
 
