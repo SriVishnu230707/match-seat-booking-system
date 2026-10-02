@@ -39,14 +39,18 @@ function createBookingRateLimiter({ limit = LIMIT, windowSeconds = WINDOW_SECOND
   async function consume(client, ipAddress) {
     // Hash the address so the Redis key does not contain a raw client IP.
     const key = `ratelimit:booking:${createHash('sha256').update(ipAddress).digest('hex')}`;
-    if (!client?.isReady) return localAttempt(key);
+    // A null client means Redis was unavailable at startup and this process
+    // has always used local counters. A client that later disconnected may
+    // already hold attempts in Redis; restarting locally would reset them.
+    if (!client) return localAttempt(key);
+    if (!client.isReady) return { unavailable: true };
     try {
       const [count, ttl] = await client.eval(INCREMENT_WITH_EXPIRY, { keys: [key], arguments: [String(windowSeconds)] });
       return result(Number(count), Math.max(1, Number(ttl)), 'REDIS');
     } catch (error) {
-      console.warn(`Redis rate limit failed; using local counter: ${error.message}`);
+      console.warn(`Redis rate limit failed; blocking bookings until restart: ${error.message}`);
       client.destroy();
-      return localAttempt(key);
+      return { unavailable: true };
     }
   }
 

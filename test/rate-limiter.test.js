@@ -37,3 +37,15 @@ test('Redis counter is shared across server instances and expires', async () => 
   time = 10_000;
   assert.equal((await second.consume(redis, '127.0.0.1')).allowed, true);
 });
+
+test('Redis failure cannot reset a client to a fresh local limit', async () => {
+  const limiter = createBookingRateLimiter();
+  const redis = {
+    isReady: true,
+    async eval() { throw new Error('connection lost'); },
+    destroy() { this.isReady = false; }
+  };
+  assert.deepEqual(await limiter.consume(redis, '127.0.0.1'), { unavailable: true });
+  assert.deepEqual(await limiter.consume(redis, '127.0.0.1'), { unavailable: true });
+  assert.equal((await limiter.consume(null, '127.0.0.1')).allowed, true);
+});

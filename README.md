@@ -67,7 +67,7 @@ Click **Check availability again** twice, wait 10 seconds, then click again. The
 - Redis stores `ratelimit:booking:<hashed IP>` and atomically increments the counter and sets its expiry with a Lua script. This prevents concurrent requests from escaping the limit.
 - The sixth attempt receives HTTP 429, a `Retry-After` header, and a clear message. The page shows remaining attempts and whether Redis or the local fallback counted them.
 - The server uses the socket address rather than an untrusted `X-Forwarded-For` header. Users sharing a public IP also share the limit. A future login system can provide a better identity.
-- When Redis is unavailable, this single app process uses a bounded in-memory counter. Its limit is **not shared across multiple server processes**; run Redis for a shared limit.
+- If Redis was unavailable at startup, this single app process uses a bounded in-memory counter. Its limit is **not shared across multiple server processes**; run Redis for a shared limit. If an established Redis connection fails later, bookings return HTTP 503 until restart so an attacker cannot gain a fresh local allowance.
 
 To inspect a Redis counter after making a booking attempt, use `SCAN 0 MATCH ratelimit:booking:*` in `redis-cli`, then `GET` and `TTL` with the returned key. The key contains a hash of the IP address.
 

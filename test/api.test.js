@@ -55,3 +55,21 @@ test('booking API returns 429 with retry time after five attempts', async () => 
     database.close();
   }
 });
+
+test('booking API does not reserve seats when the shared limiter is unavailable', async () => {
+  const database = openDatabase(':memory:');
+  const limitedServer = createBookingServer({ database, getCache: () => null, rateLimiter: { consume: async () => ({ unavailable: true }) } });
+  await new Promise(resolve => limitedServer.listen(0, resolve));
+  try {
+    const origin = `http://localhost:${limitedServer.address().port}`;
+    const response = await fetch(`${origin}/api/reservations`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ matchId: 1, seatId: 1, name: 'Asha', email: 'asha@example.com' })
+    });
+    assert.equal(response.status, 503);
+    assert.equal(database.prepare('SELECT COUNT(*) AS count FROM reservations').get().count, 0);
+  } finally {
+    await new Promise(resolve => limitedServer.close(resolve));
+    database.close();
+  }
+});
