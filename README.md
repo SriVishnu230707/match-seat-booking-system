@@ -85,11 +85,11 @@ To inspect a hold, run `GET hold:1:1` and `TTL hold:1:1` in `redis-cli` after se
 
 ## Phase 5 safe confirmation retries
 
-- The browser creates one UUID request ID per hold and reuses it for every confirmation retry. It saves pending name and email in tab session storage so a refresh can restore the attempt.
+- The browser creates one UUID request ID per hold and reuses it for every confirmation retry. It saves pending name and email separately from the seat hold in tab session storage, so the request ID survives hold expiry and a refresh can recover the outcome.
 - SQLite stores the request ID with the confirmed reservation and enforces uniqueness. A retry returns the original reservation with HTTP 200 and `replayed: true`; a different booking using the same ID receives HTTP 409.
 - Redis uses `SET confirmation:<requestId>:lock <token> NX EX 30` to coordinate confirmations in flight. A second request receives HTTP 409 with `code: PROCESSING` and can retry. A token-checked script releases the lock; expiry handles a crashed worker.
 - SQLite's unique indexes remain the final protection if a Redis lock expires during a slow request or several server processes race. Completed retries still work if Redis later becomes unavailable because the confirmed result is in SQLite.
-- On page refresh, the browser checks the saved request ID for a completed reservation before trying to restore the seat hold. Keep the request ID private: it can retrieve a limited confirmation summary in this learning app.
+- On page refresh, the browser checks the saved request ID for a completed reservation before trying to restore the seat hold. The **Check booking status** button can repeat that check after an uncertain response. Keep the request ID private: it can retrieve a limited confirmation summary in this learning app.
 
 To inspect a confirmation lock while a request is in flight, use `SCAN 0 MATCH confirmation:*:lock`, then `TTL` on the returned key. Normal confirmations may finish too quickly to observe the key manually.
 
