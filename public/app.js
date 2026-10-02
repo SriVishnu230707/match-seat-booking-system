@@ -3,10 +3,22 @@ const seatsEl = document.querySelector('#seats');
 const form = document.querySelector('#booking-form');
 const messageEl = document.querySelector('#message');
 const refreshButton = document.querySelector('#refresh-button');
+const holdStatusEl = document.querySelector('#hold-status');
+const cancelHoldButton = document.querySelector('#cancel-hold');
 let matches = [];
 let currentMatch = null;
 let selectedSeat = null;
 let seatLoadId = 0;
+let currentHold = null;
+let holdBusy = false;
+let bookingBusy = false;
+
+function setHold(hold) {
+  currentHold = hold;
+  if (hold) sessionStorage.setItem('cricket-seat-hold', JSON.stringify(hold));
+  else sessionStorage.removeItem('cricket-seat-hold');
+  updateHoldStatus();
+}
 
 const money = amount => `₹${Number(amount).toLocaleString('en-IN')}`;
 function message(text, kind = '') { messageEl.textContent = text; messageEl.className = kind; }
@@ -31,8 +43,42 @@ async function api(url, options, cacheLabel) {
   if (typeof cacheLabel === 'function') cacheLabel(response);
   else if (cacheLabel) showCache(cacheLabel, response);
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || 'Something went wrong.');
+  if (!response.ok) throw Object.assign(new Error(data.error || 'Something went wrong.'), { status: response.status });
   return data;
+}
+
+function updateHoldStatus() {
+  if (!currentHold) {
+    holdStatusEl.textContent = 'No seat held.';
+    cancelHoldButton.disabled = true;
+    return;
+  }
+  const seconds = Math.max(0, Math.ceil((Date.parse(currentHold.expiresAt) - Date.now()) / 1000));
+  holdStatusEl.textContent = `Seat held · ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} remaining`;
+  cancelHoldButton.disabled = false;
+}
+
+async function cancelCurrentHold() {
+  if (!currentHold) return true;
+  const hold = currentHold;
+  try {
+    const response = await fetch('/api/holds', {
+      method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ matchId: hold.matchId, seatId: hold.seatId, token: hold.token })
+    });
+    if (response.status !== 204 && response.status !== 409) {
+      const data = await response.json();
+      throw new Error(data.error || 'Could not cancel the hold.');
+    }
+    if (currentHold === hold) {
+      setHold(null);
+      selectedSeat = null;
+    }
+    return true;
+  } catch (error) {
+    message(error.message, 'error');
+    return false;
+  }
 }
 
 async function loadMatches() {
@@ -46,27 +92,28 @@ async function loadMatches() {
       button.innerHTML = `<small></small><strong></strong><small></small>`;
       button.children[0].textContent = new Date(match.starts_at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
       button.children[1].textContent = `${match.home_team} vs ${match.away_team}`;
-      button.children[2].textContent = `${match.venue} · ${match.available_seats}/${match.total_seats} available`;
+      button.children[2].textContent = `${match.venue} · ${match.available_seats}/${match.total_seats} not reserved`;
       button.addEventListener('click', () => chooseMatch(match));
       matchesEl.append(button);
     }
-    if (!currentMatch && matches.length) await chooseMatch(matches[0]);
+    if (!currentMatch && matches.length) await chooseMatch(matches.find(match => match.id === currentHold?.matchId) || matches[0]);
     return true;
   } catch (error) { message(error.message, 'error'); return false; }
 }
 
 async function chooseMatch(match) {
+  if (currentHold && currentHold.matchId !== match.id && !(await cancelCurrentHold())) return false;
   const requestId = ++seatLoadId;
   currentMatch = match;
   selectedSeat = null;
   document.querySelector('#book-button').disabled = true;
-  document.querySelector('#selection').textContent = 'Select a seat to continue.';
+  document.querySelector('#selection').textContent = 'Select a seat to hold it for five minutes.';
   document.querySelector('#match-description').textContent = `${match.home_team} vs ${match.away_team} · ${match.venue}`;
   message('');
   for (const button of matchesEl.children) button.classList.toggle('selected', button.children[1].textContent === `${match.home_team} vs ${match.away_team}`);
   seatsEl.textContent = 'Loading seats…';
   try {
-    const { seats } = await api(`/api/matches/${match.id}/seats`, undefined, response => {
+    const { seats, holdsAvailable } = await api(`/api/matches/${match.id}/seats`, undefined, response => {
       if (requestId === seatLoadId) showCache('#seat-cache', response);
     });
     if (requestId !== seatLoadId) return false;
@@ -80,23 +127,23 @@ async function chooseMatch(match) {
       grid.className = 'seat-grid';
       for (const seat of seats.filter(item => item.section === sectionName)) {
         const button = document.createElement('button');
-        button.className = 'seat';
+        const ownHold = seat.held && currentHold?.matchId === match.id && currentHold.seatId === seat.id && Date.parse(currentHold.expiresAt) > Date.now();
+        button.className = `seat${seat.held ? ' held' : ''}${ownHold ? ' selected' : ''}`;
         button.textContent = `${seat.row_label}${seat.seat_number}`;
         button.title = `${sectionName}, row ${seat.row_label}, seat ${seat.seat_number}`;
-        button.disabled = !seat.available;
-        button.addEventListener('click', () => {
-          seatsEl.querySelectorAll('.seat.selected').forEach(item => item.classList.remove('selected'));
-          button.classList.add('selected');
+        button.disabled = !holdsAvailable || (!seat.available && !ownHold);
+        if (ownHold) {
           selectedSeat = seat;
           document.querySelector('#selection').textContent = `${sectionName} · ${seat.row_label}${seat.seat_number} · ${money(seat.price)}`;
           document.querySelector('#book-button').disabled = false;
-          message('');
-        });
+        }
+        button.addEventListener('click', () => holdSeat(match, seat));
         grid.append(button);
       }
       section.append(title, grid);
       seatsEl.append(section);
     }
+    if (!holdsAvailable) message('Redis is unavailable. Start it and restart the app to hold seats.', 'error');
     return true;
   } catch (error) {
     if (requestId !== seatLoadId) return false;
@@ -106,27 +153,76 @@ async function chooseMatch(match) {
   }
 }
 
+async function holdSeat(match, seat) {
+  if (holdBusy || bookingBusy || currentMatch?.id !== match.id) return;
+  if (currentHold?.matchId === match.id && currentHold.seatId === seat.id) return;
+  holdBusy = true;
+  try {
+    if (!(await cancelCurrentHold())) return;
+    message('Holding your seat…');
+    const { hold } = await api('/api/holds', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ matchId: match.id, seatId: seat.id })
+    });
+    setHold(hold);
+    if (currentMatch?.id !== match.id) {
+      await cancelCurrentHold();
+      return;
+    }
+    const refreshed = await chooseMatch(match);
+    message(refreshed
+      ? `Seat ${seat.row_label}${seat.seat_number} is held for five minutes.`
+      : `Seat ${seat.row_label}${seat.seat_number} is held, but availability could not refresh. Try checking again.`, 'success');
+  } catch (error) {
+    if (currentMatch?.id === match.id) await chooseMatch(match);
+    message(error.message, 'error');
+  } finally {
+    holdBusy = false;
+  }
+}
+
 form.addEventListener('submit', async event => {
   event.preventDefault();
-  if (!currentMatch || !selectedSeat) return;
+  if (!currentMatch || !selectedSeat || !currentHold || holdBusy || bookingBusy) return;
+  bookingBusy = true;
   const button = document.querySelector('#book-button');
   button.disabled = true;
-  const body = { matchId: currentMatch.id, seatId: selectedSeat.id, name: form.elements.name.value, email: form.elements.email.value };
+  const body = { matchId: currentMatch.id, seatId: selectedSeat.id, holdToken: currentHold.token, name: form.elements.name.value, email: form.elements.email.value };
   try {
     const { reservation } = await api('/api/reservations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, showRateLimit);
     const confirmation = `Booked! Reservation #${reservation.id}: ${reservation.section} ${reservation.row_label}${reservation.seat_number}.`;
+    setHold(null);
     selectedSeat = null;
-    document.querySelector('#selection').textContent = 'Select another seat to continue.';
     form.reset();
     const seatRefreshOk = await chooseMatch(currentMatch);
     const matchesRefreshOk = await loadMatches();
     message(seatRefreshOk && matchesRefreshOk ? confirmation : `${confirmation} Availability could not be refreshed; reload the page.`, 'success');
   } catch (error) {
+    if (error.status === 409) { setHold(null); selectedSeat = null; }
     button.disabled = false;
     await chooseMatch(currentMatch);
     message(error.message, 'error');
+  } finally {
+    bookingBusy = false;
   }
 });
+
+cancelHoldButton.addEventListener('click', async () => {
+  if (holdBusy || bookingBusy) return;
+  if (await cancelCurrentHold() && currentMatch) {
+    await chooseMatch(currentMatch);
+    message('Seat hold cancelled.');
+  }
+});
+
+setInterval(() => {
+  if (!currentHold || bookingBusy) return;
+  if (Date.parse(currentHold.expiresAt) <= Date.now()) {
+    setHold(null);
+    selectedSeat = null;
+    if (currentMatch) void chooseMatch(currentMatch).then(() => message('Your seat hold expired. Select a seat again.', 'error'));
+  } else updateHoldStatus();
+}, 1000);
 
 refreshButton.addEventListener('click', async () => {
   refreshButton.disabled = true;
@@ -140,4 +236,20 @@ refreshButton.addEventListener('click', async () => {
   }
 });
 
-loadMatches();
+async function restoreHold() {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem('cricket-seat-hold'));
+    if (saved && Number.isSafeInteger(saved.matchId) && Number.isSafeInteger(saved.seatId) && typeof saved.token === 'string') {
+      const { hold } = await api('/api/holds/check', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ matchId: saved.matchId, seatId: saved.seatId, token: saved.token })
+      });
+      setHold(hold);
+    }
+  } catch (error) {
+    if (error.status !== 503) setHold(null);
+  }
+  await loadMatches();
+}
+
+restoreHold();

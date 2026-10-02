@@ -4,6 +4,7 @@ const path = require('node:path');
 const { openDatabase, listMatches, listSeats, reserveSeat } = require('./db');
 const { connectCache, getOrLoad, invalidateAvailability, MATCHES_KEY, seatsKey, TTL_SECONDS } = require('./cache');
 const { createBookingRateLimiter } = require('./rate-limiter');
+const holdService = require('./holds');
 
 const db = openDatabase();
 const publicDir = path.join(__dirname, 'public');
@@ -32,7 +33,7 @@ function readJson(req) {
   });
 }
 
-function createBookingServer({ database = db, getCache = () => cache, rateLimiter = createBookingRateLimiter() } = {}) {
+function createBookingServer({ database = db, getCache = () => cache, rateLimiter = createBookingRateLimiter(), holdLimiter = createBookingRateLimiter({ limit: 10, scope: 'hold' }), holds = holdService } = {}) {
 return http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://localhost');
@@ -42,8 +43,48 @@ return http.createServer(async (req, res) => {
     }
     const seatsRoute = url.pathname.match(/^\/api\/matches\/(\d+)\/seats$/);
     if (req.method === 'GET' && seatsRoute) {
-      const result = await getOrLoad(getCache(), seatsKey(Number(seatsRoute[1])), () => listSeats(database, Number(seatsRoute[1])));
-      return result.value ? sendJson(res, 200, { seats: result.value }, result.cache) : sendJson(res, 404, { error: 'Match not found.' }, result.cache);
+      const matchId = Number(seatsRoute[1]);
+      const result = await getOrLoad(getCache(), seatsKey(matchId), () => listSeats(database, matchId));
+      if (!result.value) return sendJson(res, 404, { error: 'Match not found.' }, result.cache);
+      const decorated = await holds.decorateSeatsWithHolds(getCache(), matchId, result.value);
+      return decorated.status === 200
+        ? sendJson(res, 200, { seats: decorated.seats, holdsAvailable: decorated.holdsAvailable }, result.cache)
+        : sendJson(res, decorated.status, { error: decorated.error }, result.cache);
+    }
+    if (url.pathname === '/api/holds' && req.method === 'POST') {
+      const attempt = await holdLimiter.consume(getCache(), req.socket.remoteAddress || 'unknown');
+      if (attempt.unavailable) return sendJson(res, 503, { error: 'Seat holds are temporarily unavailable.' });
+      if (!attempt.allowed) {
+        req.resume();
+        return sendJson(res, 429, { error: `Too many seat selections. Try again in ${attempt.retryAfter} seconds.` }, undefined,
+          { 'Retry-After': String(attempt.retryAfter) });
+      }
+      if (!/^application\/json(?:\s*;|\s*$)/i.test(req.headers['content-type'] || '')) return sendJson(res, 415, { error: 'Send JSON.' });
+      const body = await readJson(req);
+      if (!body || typeof body !== 'object' || Array.isArray(body) || !Number.isSafeInteger(body.matchId) || body.matchId < 1 || !Number.isSafeInteger(body.seatId) || body.seatId < 1) {
+        return sendJson(res, 400, { error: 'Enter a valid match and seat.' });
+      }
+      const result = await holds.acquireHold(getCache(), database, body.matchId, body.seatId);
+      return sendJson(res, result.status, result.hold ? { hold: result.hold } : { error: result.error });
+    }
+    if (url.pathname === '/api/holds' && req.method === 'DELETE') {
+      if (!/^application\/json(?:\s*;|\s*$)/i.test(req.headers['content-type'] || '')) return sendJson(res, 415, { error: 'Send JSON.' });
+      const body = await readJson(req);
+      if (!body || typeof body !== 'object' || Array.isArray(body) || !Number.isSafeInteger(body.matchId) || body.matchId < 1 || !Number.isSafeInteger(body.seatId) || body.seatId < 1 || typeof body.token !== 'string' || !body.token || body.token.length > 128) {
+        return sendJson(res, 400, { error: 'Enter a valid hold.' });
+      }
+      const result = await holds.releaseHold(getCache(), body.matchId, body.seatId, body.token);
+      if (result.status === 204) { res.writeHead(204, { 'Cache-Control': 'no-store' }); return res.end(); }
+      return sendJson(res, result.status, { error: result.error });
+    }
+    if (url.pathname === '/api/holds/check' && req.method === 'POST') {
+      if (!/^application\/json(?:\s*;|\s*$)/i.test(req.headers['content-type'] || '')) return sendJson(res, 415, { error: 'Send JSON.' });
+      const body = await readJson(req);
+      if (!body || typeof body !== 'object' || Array.isArray(body) || !Number.isSafeInteger(body.matchId) || body.matchId < 1 || !Number.isSafeInteger(body.seatId) || body.seatId < 1 || typeof body.token !== 'string' || !body.token || body.token.length > 128) {
+        return sendJson(res, 400, { error: 'Enter a valid hold.' });
+      }
+      const result = await holds.inspectHold(getCache(), body.matchId, body.seatId, body.token);
+      return sendJson(res, result.status, result.hold ? { hold: result.hold } : { error: result.error });
     }
     if (req.method === 'POST' && url.pathname === '/api/reservations') {
       // Use the socket address. X-Forwarded-For is client-controlled unless a
@@ -66,10 +107,14 @@ return http.createServer(async (req, res) => {
       const { matchId, seatId } = body;
       const name = typeof body.name === 'string' ? body.name.trim() : '';
       const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
-      if (!Number.isSafeInteger(matchId) || matchId < 1 || !Number.isSafeInteger(seatId) || seatId < 1 || !name || name.length > 100 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
-        return sendJson(res, 400, { error: 'Enter a valid seat, name, and email.' }, undefined, rateHeaders);
+      const holdToken = body.holdToken;
+      if (!Number.isSafeInteger(matchId) || matchId < 1 || !Number.isSafeInteger(seatId) || seatId < 1 || !name || name.length > 100 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254 || typeof holdToken !== 'string' || !holdToken || holdToken.length > 128) {
+        return sendJson(res, 400, { error: 'Enter a valid seat, name, email, and hold token.' }, undefined, rateHeaders);
       }
+      const holdCheck = await holds.verifyHoldForConfirmation(getCache(), matchId, seatId, holdToken);
+      if (holdCheck.status !== 200) return sendJson(res, holdCheck.status, { error: holdCheck.error }, undefined, rateHeaders);
       const result = reserveSeat(database, { matchId, seatId, name, email });
+      if (result.status === 201 || result.status === 409) await holds.releaseHold(getCache(), matchId, seatId, holdToken);
       if (result.status === 201) await invalidateAvailability(getCache(), matchId);
       return sendJson(res, result.status, result.reservation ? { reservation: result.reservation } : { error: result.error }, undefined, rateHeaders);
     }

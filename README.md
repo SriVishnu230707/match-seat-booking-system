@@ -1,6 +1,6 @@
-# Cricket Match Seat Booking System — Phase 3
+# Cricket Match Seat Booking System — Phase 4
 
-A small seat reservation app built with Node.js, SQLite, and Redis. SQLite is the source of truth for bookings. Redis caches availability and limits booking attempts.
+A small seat reservation app built with Node.js, SQLite, and Redis. SQLite stores confirmed bookings. Redis caches availability, limits requests, and holds seats temporarily during checkout.
 
 ## Run
 
@@ -14,7 +14,7 @@ npm start
 
 If the container already exists, use `docker start redis` instead of `docker run`. Open <http://localhost:3000>. The app creates `data/bookings.sqlite` and seeds one fictional match with 80 seats on first run.
 
-If Redis is unavailable at startup, the app still serves reads from SQLite. Start Redis and restart the app to enable caching. Set `REDIS_URL` if Redis is not at `redis://localhost:6379`. Set `CACHE_TTL_SECONDS` to a whole number from 1 to 3600 to change the cache lifetime (default: 30).
+If Redis is unavailable at startup, match reads still use SQLite and rate limiting uses a local counter, but **new seat holds and confirmations are unavailable**. Start Redis and restart the app. Set `REDIS_URL` if Redis is not at `redis://localhost:6379`. Set `CACHE_TTL_SECONDS` to a whole number from 1 to 3600 to change the cache lifetime (default: 30).
 
 ```powershell
 npm test
@@ -71,18 +71,33 @@ Click **Check availability again** twice, wait 10 seconds, then click again. The
 
 To inspect a Redis counter after making a booking attempt, use `SCAN 0 MATCH ratelimit:booking:*` in `redis-cli`, then `GET` and `TTL` with the returned key. The key contains a hash of the IP address.
 
+## Phase 4 temporary seat holds
+
+- Selecting an available seat calls `POST /api/holds`. Redis atomically creates `hold:<matchId>:<seatId>` with `SET ... NX EX 300`. A competing request receives HTTP 409.
+- The page shows a five-minute countdown and can cancel the hold. It stores the hold token in tab session storage, then checks the token with Redis after a page refresh.
+- `GET /api/matches/:id/seats` overlays **live Redis hold state** onto the SQLite seat list. The cached SQLite list never includes temporary holds, so expiration does not require cache invalidation.
+- `POST /api/reservations` requires a live hold token. The server verifies and briefly extends that token before writing to SQLite. SQLite's unique seat constraint still prevents duplicate confirmed bookings.
+- Cancelling or finishing a hold uses a Redis script that deletes the key only when its token matches. A late cancellation cannot delete someone else's newer hold.
+- Hold creation is limited to 10 attempts per IP per minute; booking confirmation keeps its 5-attempt limit.
+- Redis and SQLite cannot commit as one transaction. Holds provide a checkout window; SQLite is the final authority. This project has no payment flow yet.
+
+To inspect a hold, run `GET hold:1:1` and `TTL hold:1:1` in `redis-cli` after selecting seat ID 1. Treat the returned token as private.
+
 ## API
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/api/matches` | List matches and availability counts |
 | GET | `/api/matches/1/seats` | List seats for a match |
-| POST | `/api/reservations` | Reserve a seat |
+| POST | `/api/holds` | Hold a seat for five minutes |
+| POST | `/api/holds/check` | Check ownership and remaining hold time |
+| DELETE | `/api/holds` | Cancel a hold using its token |
+| POST | `/api/reservations` | Confirm a held seat |
 
 Example request:
 
 ```json
-{"matchId":1,"seatId":1,"name":"Asha","email":"asha@example.com"}
+{"matchId":1,"seatId":1,"holdToken":"token-from-the-hold-response","name":"Asha","email":"asha@example.com"}
 ```
 
-This learning project does not have accounts, payments, or temporary holds yet. Cached seat availability is a display aid; SQLite decides whether a reservation succeeds.
+This learning project does not have accounts or payments yet. The hold token is a bearer token; anyone with it can act on that hold. SQLite decides whether a reservation succeeds.

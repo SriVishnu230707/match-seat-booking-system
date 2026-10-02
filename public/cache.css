@@ -5,3 +5,11 @@
 .cache-badges span { border: 1px solid #c7ddcd; border-radius: 999px; background: white; padding: 5px 10px; font-size: 12px; font-weight: 750; }
 .cache-lab button { border: 1px solid #207b4d; border-radius: 9px; background: white; color: #17613b; padding: 10px 14px; font: inherit; font-weight: 700; cursor: pointer; }
 .cache-lab button:disabled { opacity: .5; cursor: wait; }
+.dot.held { background: #f6d98f; margin-left: 10px; }
+.seat.held { background: #fff5d8; border-color: #e3c66d; color: #826118; }
+.seat.held:disabled { background: #fff5d8; border-color: #e3c66d; color: #826118; }
+.seat.selected, .seat.selected:disabled { background: #1b794a; border-color: #1b794a; color: white; }
+.hold-controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 12px 0; }
+#hold-status { color: #17613b; font-weight: 700; }
+#cancel-hold { border: 1px solid #cbd9ce; border-radius: 8px; background: white; padding: 7px 12px; cursor: pointer; }
+#cancel-hold:disabled { opacity: .5; cursor: not-allowed; }

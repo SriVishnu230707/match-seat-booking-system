@@ -14,7 +14,7 @@ const INCREMENT_WITH_EXPIRY = `
   return { count, ttl }
 `;
 
-function createBookingRateLimiter({ limit = LIMIT, windowSeconds = WINDOW_SECONDS, now = Date.now } = {}) {
+function createBookingRateLimiter({ limit = LIMIT, windowSeconds = WINDOW_SECONDS, scope = 'booking', now = Date.now } = {}) {
   const local = new Map();
 
   function localAttempt(key) {
@@ -38,7 +38,7 @@ function createBookingRateLimiter({ limit = LIMIT, windowSeconds = WINDOW_SECOND
 
   async function consume(client, ipAddress) {
     // Hash the address so the Redis key does not contain a raw client IP.
-    const key = `ratelimit:booking:${createHash('sha256').update(ipAddress).digest('hex')}`;
+    const key = `ratelimit:${scope}:${createHash('sha256').update(ipAddress).digest('hex')}`;
     // A null client means Redis was unavailable at startup and this process
     // has always used local counters. A client that later disconnected may
     // already hold attempts in Redis; restarting locally would reset them.

@@ -73,3 +73,25 @@ test('booking API does not reserve seats when the shared limiter is unavailable'
     database.close();
   }
 });
+
+test('seat holds fail closed when Redis is unavailable', async () => {
+  const database = openDatabase(':memory:');
+  const isolatedServer = createBookingServer({ database, getCache: () => null });
+  await new Promise(resolve => isolatedServer.listen(0, resolve));
+  try {
+    const origin = `http://localhost:${isolatedServer.address().port}`;
+    const seatResponse = await fetch(`${origin}/api/matches/1/seats`);
+    const { seats, holdsAvailable } = await seatResponse.json();
+    assert.equal(holdsAvailable, false);
+    assert.equal(seats[0].available, 0);
+    const response = await fetch(`${origin}/api/holds`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ matchId: 1, seatId: seats[0].id })
+    });
+    assert.equal(response.status, 503);
+    assert.equal(database.prepare('SELECT COUNT(*) AS count FROM reservations').get().count, 0);
+  } finally {
+    await new Promise(resolve => isolatedServer.close(resolve));
+    database.close();
+  }
+});
