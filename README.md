@@ -1,4 +1,4 @@
-# Cricket Match Seat Booking System — Phase 5
+# Cricket Match Seat Booking System — Phase 6
 
 A small seat reservation app built with Node.js, SQLite, and Redis. SQLite stores confirmed bookings. Redis caches availability, limits requests, holds seats temporarily, and coordinates confirmation retries.
 
@@ -19,6 +19,19 @@ If Redis is unavailable at startup, match reads still use SQLite and rate limiti
 ```powershell
 npm test
 ```
+
+To run the real Redis integration suite, start a disposable Redis instance and set `REDIS_TEST_URL`. The suite prefixes every Redis key with a random test namespace and removes those keys afterward; it does not flush the database.
+
+```powershell
+# In a separate terminal, when Redis is installed in WSL Ubuntu:
+wsl -d Ubuntu -- redis-server --bind 127.0.0.1 --port 6380 --save "" --appendonly no
+
+# Back in the project terminal:
+$env:REDIS_TEST_URL = 'redis://127.0.0.1:6380'
+npm run test:integration
+```
+
+If Redis is already running elsewhere, point `REDIS_TEST_URL` at that local test instance instead. Do not use a production Redis URL for tests.
 
 Node 22 may print an experimental warning for its built-in SQLite module.
 
@@ -92,6 +105,13 @@ To inspect a hold, run `GET hold:1:1` and `TTL hold:1:1` in `redis-cli` after se
 - On page refresh, the browser checks the saved request ID for a completed reservation before trying to restore the seat hold. The **Check booking status** button can repeat that check after an uncertain response. Keep the request ID private: it can retrieve a limited confirmation summary in this learning app.
 
 To inspect a confirmation lock while a request is in flight, use `SCAN 0 MATCH confirmation:*:lock`, then `TTL` on the returned key. Normal confirmations may finish too quickly to observe the key manually.
+
+## Phase 6 real Redis reliability checks
+
+- `npm test` runs the fast unit and API tests using the Redis test double. `npm run test:integration` uses an actual Redis server and a temporary SQLite database.
+- The integration suite checks competing holds, real key expiry, shared availability, confirmation and replay across two app instances, and Redis disconnection. It also starts two separate Node processes to verify one reservation and a shared booking rate limit.
+- Completed confirmation retries work from SQLite even after the Redis client disconnects. New holds fail with HTTP 503 until a healthy Redis connection is available. The running app does not reconnect automatically; restart it after restoring Redis.
+- The test suite does not modify `data/bookings.sqlite`. Temporary SQLite files and namespaced Redis test keys are cleaned up after the run.
 
 ## API
 

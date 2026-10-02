@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "start": "node server.js",
-    "test": "node --test"
+    "test": "node --test test/api.test.js test/booking.test.js test/cache.test.js test/holds.test.js test/rate-limiter.test.js",
+    "test:integration": "node --test test/redis.integration.test.js"
   },
   "engines": {
     "node": ">=22.13.0"
