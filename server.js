@@ -19,17 +19,17 @@ function sendJson(res, status, body, cacheStatus, extraHeaders = {}) {
 
 function readJson(req) {
   return new Promise((resolve, reject) => {
-    let body = '';
+    const chunks = [];
     let bytes = 0;
     let tooLarge = false;
     req.on('data', chunk => {
       bytes += chunk.length;
       if (bytes > 10_000) { tooLarge = true; return; }
-      body += chunk;
+      chunks.push(chunk);
     });
     req.on('end', () => {
       if (tooLarge) return reject(Object.assign(new Error('Request is too large.'), { status: 413 }));
-      try { resolve(JSON.parse(body)); } catch { reject(new Error('Invalid JSON.')); }
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { reject(new Error('Invalid JSON.')); }
     });
     req.on('error', reject);
   });
@@ -84,7 +84,9 @@ return http.createServer(async (req, res) => {
       const user = registering ? await auth.createUser(database, { name, email, password }) : await auth.verifyUser(database, email, password);
       if (!user) return sendJson(res, registering ? 409 : 401, { error: registering ? 'An account with this email already exists.' : 'Invalid email or password.' });
       const token = await auth.createSession(redis, user.id);
-      if (!token) return sendJson(res, 503, { error: 'Could not create a session. Try again.' });
+      if (!token) return sendJson(res, 503, registering
+        ? { error: 'Your account was created, but sign-in is temporarily unavailable. Sign in with this account when Redis is available.', accountCreated: true }
+        : { error: 'Could not create a session. Try again.' });
       return sendJson(res, registering ? 201 : 200, { user }, undefined, { 'Set-Cookie': auth.cookieHeader(token, process.env.COOKIE_SECURE === '1' || Boolean(req.socket.encrypted)) });
     }
     if (req.method === 'GET' && url.pathname === '/api/me') {
@@ -108,6 +110,7 @@ return http.createServer(async (req, res) => {
     const seatsRoute = url.pathname.match(/^\/api\/matches\/(\d+)\/seats$/);
     if (req.method === 'GET' && seatsRoute) {
       const matchId = Number(seatsRoute[1]);
+      if (!Number.isSafeInteger(matchId) || matchId < 1) return sendJson(res, 400, { error: 'Enter a valid match ID.' });
       const result = await getOrLoad(getCache(), seatsKey(matchId), () => listSeats(database, matchId));
       if (!result.value) return sendJson(res, 404, { error: 'Match not found.' }, result.cache);
       const decorated = await holds.decorateSeatsWithHolds(getCache(), matchId, result.value);

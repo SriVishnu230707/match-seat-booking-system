@@ -35,6 +35,24 @@ If Redis is already running elsewhere, point `REDIS_TEST_URL` at that local test
 
 Node 22 may print an experimental warning for its built-in SQLite module.
 
+### Windows with WSL Ubuntu
+
+When Redis is installed in WSL Ubuntu, this launcher starts a separate Redis on port 6380, protects it with a generated password stored in ignored `data/`, and uses the WSL address so Windows can connect:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/start-local.ps1
+```
+
+In Antigravity, use **Terminal → Run Task → Run booking app with local Redis**. Open http://localhost:3000. Redis for this launcher is temporary: restarting it clears sessions and holds; SQLite bookings remain saved.
+
+Run the integration tests with the same local Redis setup:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/start-local.ps1 -IntegrationTest
+```
+
+If `REDIS_URL` is already set, the launcher uses that Redis instead.
+
 ## Phase 2 caching
 
 - `GET /api/matches` caches its result at `matches:list`.

@@ -38,8 +38,10 @@ function setUser(user) {
 
 async function loadMyBookings() {
   if (!currentUser) return;
+  const user = currentUser;
   try {
     const { reservations } = await api('/api/me/reservations');
+    if (currentUser !== user) return;
     const container = document.querySelector('#my-bookings');
     container.replaceChildren();
     if (!reservations.length) container.textContent = 'No bookings yet.';
@@ -49,7 +51,7 @@ async function loadMyBookings() {
       row.textContent = `#${reservation.id} · ${reservation.home_team} vs ${reservation.away_team} · ${reservation.section} ${reservation.row_label}${reservation.seat_number}`;
       container.append(row);
     }
-  } catch (error) { document.querySelector('#my-bookings').textContent = error.message; }
+  } catch (error) { if (currentUser === user) document.querySelector('#my-bookings').textContent = error.message; }
 }
 
 authAction.addEventListener('change', () => {
@@ -75,7 +77,13 @@ authForm.addEventListener('submit', async event => {
     authMessageEl.textContent = `Signed in as ${user.name}.`;
     await restoreHold();
     await loadMyBookings();
-  } catch (error) { authMessageEl.textContent = error.message; }
+  } catch (error) {
+    if (error.accountCreated) {
+      authAction.value = 'login';
+      authAction.dispatchEvent(new Event('change'));
+    }
+    authMessageEl.textContent = error.message;
+  }
   finally { button.disabled = false; }
 });
 
@@ -116,6 +124,7 @@ async function checkPendingBooking() {
     setHold(null);
     selectedSeat = null;
     form.reset();
+    setUser(currentUser);
     if (currentMatch) await chooseMatch(currentMatch);
     await loadMatches();
     await loadMyBookings();
@@ -165,7 +174,7 @@ async function api(url, options, cacheLabel) {
   else if (cacheLabel) showCache(cacheLabel, response);
   const data = await response.json();
   if (response.status === 401 && url !== '/api/auth/login' && url !== '/api/auth/register') setUser(null);
-  if (!response.ok) throw Object.assign(new Error(data.error || 'Something went wrong.'), { status: response.status, code: data.code });
+  if (!response.ok) throw Object.assign(new Error(data.error || 'Something went wrong.'), { status: response.status, code: data.code, accountCreated: data.accountCreated });
   return data;
 }
 
@@ -188,6 +197,7 @@ async function cancelCurrentHold() {
       method: 'DELETE', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ matchId: hold.matchId, seatId: hold.seatId, token: hold.token })
     });
+    if (response.status === 401) setUser(null);
     if (response.status !== 204 && response.status !== 409) {
       const data = await response.json();
       throw new Error(data.error || 'Could not cancel the hold.');
@@ -330,6 +340,7 @@ form.addEventListener('submit', async event => {
     setPending(null);
     selectedSeat = null;
     form.reset();
+    setUser(currentUser);
     const seatRefreshOk = await chooseMatch(currentMatch);
     const matchesRefreshOk = await loadMatches();
     await loadMyBookings();

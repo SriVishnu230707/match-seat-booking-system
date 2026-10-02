@@ -1,11 +1,44 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const http = require('node:http');
 const { server } = require('../server');
 const { createBookingServer } = require('../server');
 const { openDatabase } = require('../db');
 const { createBookingRateLimiter } = require('../rate-limiter');
 const { fakeRedis } = require('./support/fake-redis');
 const { register } = require('./support/auth-client');
+
+test('JSON parsing preserves Unicode across network chunks and rejects unsafe match IDs', async () => {
+  const database = openDatabase(':memory:');
+  const redis = fakeRedis();
+  const isolatedServer = createBookingServer({ database, getCache: () => redis });
+  await new Promise(resolve => isolatedServer.listen(0, resolve));
+  const origin = `http://127.0.0.1:${isolatedServer.address().port}`;
+  try {
+    const name = 'விஷ்ணு';
+    const bytes = Buffer.from(JSON.stringify({ name, email: 'unicode@example.com', password: 'testing-password-123' }));
+    const split = bytes.indexOf(Buffer.from(name)) + 1;
+    const response = await new Promise((resolve, reject) => {
+      const request = http.request(`${origin}/api/auth/register`, { method: 'POST', headers: { 'Content-Type': 'application/json' } }, res => {
+        let body = '';
+        res.on('data', chunk => { body += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(body) }));
+        res.on('error', reject);
+      });
+      request.on('error', reject);
+      request.write(bytes.subarray(0, split));
+      setTimeout(() => request.end(bytes.subarray(split)), 30);
+    });
+    assert.equal(response.status, 201);
+    assert.equal(response.body.user.name, name);
+    for (const id of ['0', '9007199254740992', '9'.repeat(400)]) {
+      assert.equal((await fetch(`${origin}/api/matches/${id}/seats`)).status, 400);
+    }
+  } finally {
+    await new Promise(resolve => isolatedServer.close(resolve));
+    database.close();
+  }
+});
 
 test('reservation API returns client errors for malformed bodies', async () => {
   const database = openDatabase(':memory:');

@@ -10,6 +10,34 @@ const { createBookingServer } = require('../server');
 const { fakeRedis } = require('./support/fake-redis');
 const { register } = require('./support/auth-client');
 
+test('signup reports a saved account when session creation fails and allows login recovery', async () => {
+  const db = openDatabase(':memory:');
+  const redis = fakeRedis();
+  const set = redis.set.bind(redis);
+  redis.set = async (key, ...args) => {
+    if (key.startsWith('session:')) throw new Error('Simulated session write failure');
+    return set(key, ...args);
+  };
+  const server = createBookingServer({ database: db, getCache: () => redis });
+  await new Promise(resolve => server.listen(0, resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const details = { name: 'Recovery', email: 'recovery@example.com', password: 'testing-password-123' };
+  const post = route => fetch(`${origin}${route}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(details) });
+  try {
+    const response = await post('/api/auth/register');
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).accountCreated, true);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM users').get().count, 1);
+    redis.set = set;
+    const login = await post('/api/auth/login');
+    assert.equal(login.status, 200);
+    assert.match(login.headers.get('set-cookie'), /^cricket_session=/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    db.close();
+  }
+});
+
 test('accounts own sessions, holds, status, and reservation history', async () => {
   const db = openDatabase(':memory:');
   const redis = fakeRedis();
