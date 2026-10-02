@@ -17,6 +17,15 @@ function showCache(label, response) {
   const ttl = response.headers.get('x-cache-ttl-seconds');
   if (ttl) document.querySelector('#cache-explanation').textContent = `HIT = Redis · MISS = SQLite, then cached · BYPASS = SQLite without Redis · TTL = ${ttl}s`;
 }
+function showRateLimit(response) {
+  const remaining = response.headers.get('x-ratelimit-remaining');
+  if (remaining === null) return;
+  const source = response.headers.get('x-ratelimit-source') === 'REDIS' ? 'Redis' : 'local fallback';
+  const retry = response.headers.get('retry-after');
+  document.querySelector('#rate-limit-status').textContent = retry
+    ? `Booking limit reached. Try again in ${retry} seconds. Counter: ${source}.`
+    : `${remaining} of 5 booking attempts left in this window. Counter: ${source}.`;
+}
 async function api(url, options, cacheLabel) {
   const response = await fetch(url, options);
   if (typeof cacheLabel === 'function') cacheLabel(response);
@@ -104,7 +113,7 @@ form.addEventListener('submit', async event => {
   button.disabled = true;
   const body = { matchId: currentMatch.id, seatId: selectedSeat.id, name: form.elements.name.value, email: form.elements.email.value };
   try {
-    const { reservation } = await api('/api/reservations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const { reservation } = await api('/api/reservations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, showRateLimit);
     const confirmation = `Booked! Reservation #${reservation.id}: ${reservation.section} ${reservation.row_label}${reservation.seat_number}.`;
     selectedSeat = null;
     document.querySelector('#selection').textContent = 'Select another seat to continue.';
