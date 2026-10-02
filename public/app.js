@@ -6,6 +6,7 @@ const refreshButton = document.querySelector('#refresh-button');
 const holdStatusEl = document.querySelector('#hold-status');
 const cancelHoldButton = document.querySelector('#cancel-hold');
 const checkBookingButton = document.querySelector('#check-booking');
+const discardPendingButton = document.querySelector('#discard-pending');
 let matches = [];
 let currentMatch = null;
 let selectedSeat = null;
@@ -13,6 +14,7 @@ let seatLoadId = 0;
 let currentHold = null;
 let holdBusy = false;
 let bookingBusy = false;
+let statusBusy = false;
 let pendingBooking = null;
 
 function setPending(booking) {
@@ -20,10 +22,12 @@ function setPending(booking) {
   if (booking) sessionStorage.setItem('cricket-pending-booking', JSON.stringify(booking));
   else sessionStorage.removeItem('cricket-pending-booking');
   checkBookingButton.hidden = !booking;
+  discardPendingButton.hidden = !booking;
 }
 
 async function checkPendingBooking() {
-  if (!pendingBooking) return false;
+  if (!pendingBooking || statusBusy || bookingBusy || holdBusy) return false;
+  statusBusy = true;
   checkBookingButton.disabled = true;
   try {
     const { reservation } = await api('/api/reservations/status', {
@@ -39,10 +43,14 @@ async function checkPendingBooking() {
     message(`Booked! Reservation #${reservation.id}: ${reservation.section} ${reservation.row_label}${reservation.seat_number}.`, 'success');
     return true;
   } catch (error) {
-    if (error.status === 404) message('No completed reservation yet. Check again before starting another booking.', 'error');
-    else message(error.message, 'error');
-    return false;
+    if (error.status === 404) {
+      message('No completed reservation yet. You can retry this confirmation or discard the attempt.', 'error');
+      return false;
+    }
+    message(error.message, 'error');
+    return null;
   } finally {
+    statusBusy = false;
     checkBookingButton.disabled = false;
   }
 }
@@ -67,7 +75,7 @@ function showRateLimit(response) {
   const remaining = response.headers.get('x-ratelimit-remaining');
   if (remaining === null) return;
   const source = response.headers.get('x-ratelimit-source') === 'REDIS' ? 'Redis' : 'local fallback';
-  const retry = response.headers.get('retry-after');
+  const retry = response.status === 429 ? response.headers.get('retry-after') : null;
   document.querySelector('#rate-limit-status').textContent = retry
     ? `Booking limit reached. Try again in ${retry} seconds. Counter: ${source}.`
     : `${remaining} of 5 booking attempts left in this window. Counter: ${source}.`;
@@ -136,7 +144,11 @@ async function loadMatches() {
 }
 
 async function chooseMatch(match) {
-  if (bookingBusy && currentMatch?.id !== match.id) return false;
+  if ((bookingBusy || statusBusy) && currentMatch?.id !== match.id) return false;
+  if (pendingBooking && currentMatch && currentMatch.id !== match.id) {
+    message('Check or discard the previous booking attempt before changing matches.', 'error');
+    return false;
+  }
   if (currentHold && currentHold.matchId !== match.id && !(await cancelCurrentHold())) return false;
   const requestId = ++seatLoadId;
   currentMatch = match;
@@ -189,7 +201,11 @@ async function chooseMatch(match) {
 }
 
 async function holdSeat(match, seat) {
-  if (holdBusy || bookingBusy || currentMatch?.id !== match.id) return;
+  if (holdBusy || bookingBusy || statusBusy || currentMatch?.id !== match.id) return;
+  if (pendingBooking) {
+    message('Check the previous booking status before selecting another seat.', 'error');
+    return;
+  }
   if (currentHold?.matchId === match.id && currentHold.seatId === seat.id) return;
   holdBusy = true;
   try {
@@ -218,7 +234,7 @@ async function holdSeat(match, seat) {
 
 form.addEventListener('submit', async event => {
   event.preventDefault();
-  if (!currentMatch || !selectedSeat || !currentHold || holdBusy || bookingBusy) return;
+  if (!currentMatch || !selectedSeat || !currentHold || holdBusy || bookingBusy || statusBusy) return;
   bookingBusy = true;
   const button = document.querySelector('#book-button');
   button.disabled = true;
@@ -251,7 +267,11 @@ form.addEventListener('submit', async event => {
 });
 
 cancelHoldButton.addEventListener('click', async () => {
-  if (holdBusy || bookingBusy) return;
+  if (holdBusy || bookingBusy || statusBusy) return;
+  if (pendingBooking) {
+    message('Check the booking status before cancelling this hold.', 'error');
+    return;
+  }
   if (await cancelCurrentHold() && currentMatch) {
     await chooseMatch(currentMatch);
     message('Seat hold cancelled.');
@@ -260,8 +280,17 @@ cancelHoldButton.addEventListener('click', async () => {
 
 checkBookingButton.addEventListener('click', () => { void checkPendingBooking(); });
 
+discardPendingButton.addEventListener('click', async () => {
+  if (!pendingBooking || statusBusy || bookingBusy || holdBusy) return;
+  const result = await checkPendingBooking();
+  if (result !== false) return;
+  setPending(null);
+  if (currentHold) setHold({ ...currentHold, requestId: crypto.randomUUID(), pending: undefined });
+  message('Attempt discarded. A delayed earlier request could still finish; check your booking before selecting another seat.', 'error');
+});
+
 setInterval(() => {
-  if (!currentHold || bookingBusy) return;
+  if (!currentHold || bookingBusy || statusBusy) return;
   if (Date.parse(currentHold.expiresAt) <= Date.now()) {
     setHold(null);
     selectedSeat = null;
