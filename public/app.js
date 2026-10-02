@@ -102,6 +102,7 @@ async function loadMatches() {
 }
 
 async function chooseMatch(match) {
+  if (bookingBusy && currentMatch?.id !== match.id) return false;
   if (currentHold && currentHold.matchId !== match.id && !(await cancelCurrentHold())) return false;
   const requestId = ++seatLoadId;
   currentMatch = match;

@@ -41,6 +41,23 @@ test('expired holds free the seat without allowing an old token to delete a new 
   } finally { db.close(); }
 });
 
+test('a slow Redis reply does not overstate the hold deadline', async () => {
+  const db = openDatabase(':memory:');
+  const redis = fakeRedis();
+  const originalSet = redis.set.bind(redis);
+  redis.set = async (...args) => {
+    const result = await originalSet(...args);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    return result;
+  };
+  try {
+    const startedAt = Date.now();
+    const result = await holds.acquireHold(redis, db, 1, listSeats(db, 1)[0].id);
+    assert.equal(result.status, 201);
+    assert.ok(Date.parse(result.hold.expiresAt) <= startedAt + holds.HOLD_SECONDS * 1000 + 5);
+  } finally { db.close(); }
+});
+
 test('API requires a live hold to confirm and then marks the seat reserved', async () => {
   const db = openDatabase(':memory:');
   const redis = fakeRedis();

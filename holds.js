@@ -37,15 +37,17 @@ async function acquireHold(client, db, matchId, seatId) {
   if (!seat) return { status: 404, error: 'Seat not found for this match.' };
   if (seat.reservation_id) return { status: 409, error: 'This seat is already reserved.' };
   const token = randomUUID();
+  const expiresAt = new Date(Date.now() + HOLD_SECONDS * 1000).toISOString();
   try {
     const acquired = await client.set(holdKey(matchId, seatId), token, { NX: true, EX: HOLD_SECONDS });
     if (!acquired) return { status: 409, error: 'This seat is temporarily held by another customer.' };
     // A reservation may have committed between the first SQLite check and SET.
-    if (seatRecord(db, matchId, seatId).reservation_id) {
+    const latestSeat = seatRecord(db, matchId, seatId);
+    if (!latestSeat || latestSeat.reservation_id) {
       await releaseHold(client, matchId, seatId, token);
       return { status: 409, error: 'This seat is already reserved.' };
     }
-    return { status: 201, hold: { matchId, seatId, token, expiresAt: new Date(Date.now() + HOLD_SECONDS * 1000).toISOString() } };
+    return { status: 201, hold: { matchId, seatId, token, expiresAt } };
   } catch (error) {
     console.warn(`Seat hold failed: ${error.message}`);
     return { status: 503, error: 'Seat holds are temporarily unavailable.' };
