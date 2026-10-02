@@ -9,6 +9,7 @@ const { createClient } = require('redis');
 const { openDatabase, listSeats } = require('../db');
 const { createBookingServer } = require('../server');
 const { holdKey } = require('../holds');
+const { register } = require('./support/auth-client');
 
 const redisUrl = process.env.REDIS_TEST_URL;
 
@@ -17,6 +18,7 @@ function scopedClient(raw, prefix) {
   return {
     get isReady() { return raw.isReady; },
     get: value => raw.get(key(value)),
+    del: value => raw.del(key(value)),
     set: (value, content, options) => raw.set(key(value), content, options),
     mGet: values => raw.mGet(values.map(key)),
     eval: (script, options) => raw.eval(script, { ...options, keys: options.keys.map(key) }),
@@ -42,8 +44,8 @@ async function startServer(database, client) {
   };
 }
 
-function post(origin, route, body) {
-  return fetch(`${origin}${route}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+function post(origin, route, body, cookie) {
+  return fetch(`${origin}${route}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) }, body: JSON.stringify(body) });
 }
 
 function startWorker(dbFile, prefix) {
@@ -81,10 +83,11 @@ test('real Redis: competing holds, expiry, shared confirmation, replay, and disc
     const clients = rawClients.map(raw => scopedClient(raw, prefix));
     for (let index = 0; index < 2; index++) databases.push(openDatabase(dbFile));
     for (let index = 0; index < 2; index++) servers.push(await startServer(databases[index], clients[index]));
+    const accounts = await Promise.all(servers.map(server => register(server.origin)));
     const seatId = listSeats(databases[0], 1)[0].id;
     const booking = { matchId: 1, seatId, requestId: randomUUID(), name: 'Redis Tester', email: 'redis@example.com' };
 
-    const [first, second] = await Promise.all(servers.map(server => post(server.origin, '/api/holds', { matchId: 1, seatId })));
+    const [first, second] = await Promise.all(servers.map((server, index) => post(server.origin, '/api/holds', { matchId: 1, seatId }, accounts[index].cookie)));
     assert.deepEqual([first.status, second.status].sort(), [201, 409]);
     const winnerIndex = first.status === 201 ? 0 : 1;
     const { hold } = await (winnerIndex === 0 ? first : second).json();
@@ -96,31 +99,31 @@ test('real Redis: competing holds, expiry, shared confirmation, replay, and disc
     // Shorten this test hold directly in Redis to verify real key expiry.
     await rawClients[winnerIndex].expire(`${prefix}${holdKey(1, seatId)}`, 1);
     await new Promise(resolve => setTimeout(resolve, 1200));
-    assert.equal((await post(servers[otherIndex].origin, '/api/reservations', { ...booking, holdToken: hold.token })).status, 409);
-    const replacement = await post(servers[otherIndex].origin, '/api/holds', { matchId: 1, seatId });
+    assert.equal((await post(servers[otherIndex].origin, '/api/reservations', { ...booking, holdToken: hold.token }, accounts[otherIndex].cookie)).status, 409);
+    const replacement = await post(servers[otherIndex].origin, '/api/holds', { matchId: 1, seatId }, accounts[otherIndex].cookie);
     assert.equal(replacement.status, 201);
     const nextHold = (await replacement.json()).hold;
     assert.notEqual(nextHold.token, hold.token);
 
-    const confirmed = await post(servers[otherIndex].origin, '/api/reservations', { ...booking, holdToken: nextHold.token });
+    const confirmed = await post(servers[otherIndex].origin, '/api/reservations', { ...booking, holdToken: nextHold.token }, accounts[otherIndex].cookie);
     assert.equal(confirmed.status, 201);
     const original = (await confirmed.json()).reservation;
-    const replay = await post(servers[winnerIndex].origin, '/api/reservations', { ...booking, holdToken: nextHold.token });
+    const replay = await post(servers[winnerIndex].origin, '/api/reservations', { ...booking, holdToken: nextHold.token }, accounts[otherIndex].cookie);
     assert.equal(replay.status, 200);
     assert.equal((await replay.json()).reservation.id, original.id);
     assert.equal(databases[0].prepare('SELECT COUNT(*) AS count FROM reservations').get().count, 1);
 
-    // Completed results remain in SQLite when Redis is no longer reachable.
+    // SQLite keeps the booking, but account access fails closed without Redis sessions.
     rawClients[winnerIndex].destroy();
-    assert.equal((await post(servers[winnerIndex].origin, '/api/reservations', { ...booking, holdToken: nextHold.token })).status, 200);
+    assert.equal((await post(servers[winnerIndex].origin, '/api/reservations', { ...booking, holdToken: nextHold.token }, accounts[otherIndex].cookie)).status, 503);
     const anotherSeat = listSeats(databases[0], 1)[1].id;
-    assert.equal((await post(servers[winnerIndex].origin, '/api/holds', { matchId: 1, seatId: anotherSeat })).status, 503);
+    assert.equal((await post(servers[winnerIndex].origin, '/api/holds', { matchId: 1, seatId: anotherSeat }, accounts[winnerIndex].cookie)).status, 503);
 
     // Replacing the connection restores new holds without losing SQLite state.
     const replacementRaw = await connect();
     rawClients.push(replacementRaw);
     servers[winnerIndex].useClient(scopedClient(replacementRaw, prefix));
-    assert.equal((await post(servers[winnerIndex].origin, '/api/holds', { matchId: 1, seatId: anotherSeat })).status, 201);
+    assert.equal((await post(servers[winnerIndex].origin, '/api/holds', { matchId: 1, seatId: anotherSeat }, accounts[winnerIndex].cookie)).status, 201);
   } finally {
     await Promise.all(servers.map(server => server.close()));
     databases.forEach(database => database.close());
@@ -146,22 +149,23 @@ test('real Redis: separate Node processes share holds and one durable reservatio
     cleaner = await connect();
     workers.push(await startWorker(dbFile, prefix));
     workers.push(await startWorker(dbFile, prefix));
+    const accounts = await Promise.all(workers.map(worker => register(worker.origin)));
     const db = openDatabase(dbFile);
     const seatId = listSeats(db, 1)[0].id;
     db.close();
-    const [first, second] = await Promise.all(workers.map(worker => post(worker.origin, '/api/holds', { matchId: 1, seatId })));
+    const [first, second] = await Promise.all(workers.map((worker, index) => post(worker.origin, '/api/holds', { matchId: 1, seatId }, accounts[index].cookie)));
     assert.deepEqual([first.status, second.status].sort(), [201, 409]);
     const winner = first.status === 201 ? 0 : 1;
     const hold = (await (winner === 0 ? first : second).json()).hold;
     const booking = { matchId: 1, seatId, holdToken: hold.token, requestId: randomUUID(), name: 'Process Tester', email: 'process@example.com' };
-    const confirmed = await post(workers[winner].origin, '/api/reservations', booking);
+    const confirmed = await post(workers[winner].origin, '/api/reservations', booking, accounts[winner].cookie);
     assert.equal(confirmed.status, 201);
     const original = (await confirmed.json()).reservation;
-    const replay = await post(workers[1 - winner].origin, '/api/reservations', booking);
+    const replay = await post(workers[1 - winner].origin, '/api/reservations', booking, accounts[winner].cookie);
     assert.equal(replay.status, 200);
     assert.equal((await replay.json()).reservation.id, original.id);
     for (let attempt = 1; attempt <= 5; attempt++) {
-      const limited = await post(workers[attempt % 2].origin, '/api/reservations', {});
+      const limited = await post(workers[attempt % 2].origin, '/api/reservations', {}, accounts[winner].cookie);
       assert.equal(limited.status, attempt < 5 ? 400 : 429);
       assert.equal(limited.headers.get('x-ratelimit-source'), 'REDIS');
     }

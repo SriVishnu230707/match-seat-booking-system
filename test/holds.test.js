@@ -5,6 +5,7 @@ const { openDatabase, listSeats } = require('../db');
 const { createBookingServer } = require('../server');
 const holds = require('../holds');
 const { fakeRedis } = require('./support/fake-redis');
+const { register } = require('./support/auth-client');
 
 test('only one customer can hold a seat and only its token can release it', async () => {
   const db = openDatabase(':memory:');
@@ -65,9 +66,10 @@ test('API requires a live hold to confirm and then marks the seat reserved', asy
   const server = createBookingServer({ database: db, getCache: () => redis });
   await new Promise(resolve => server.listen(0, resolve));
   const origin = `http://localhost:${server.address().port}`;
+  const { cookie } = await register(origin, 'Asha');
   const seatId = listSeats(db, 1)[0].id;
   const request = (route, body, method = 'POST') => fetch(`${origin}${route}`, {
-    method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    method, headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify(body)
   });
   try {
     const booking = { matchId: 1, seatId, name: 'Asha', email: 'asha@example.com', requestId: randomUUID() };
@@ -89,7 +91,7 @@ test('API requires a live hold to confirm and then marks the seat reserved', asy
     const replay = await request('/api/reservations', { ...booking, holdToken: hold.token });
     assert.equal(replay.status, 200);
     assert.equal((await replay.json()).reservation.id, original.id);
-    assert.equal((await request('/api/reservations', { ...booking, name: 'Someone else', holdToken: hold.token })).status, 409);
+    assert.equal((await request('/api/reservations', { ...booking, seatId: listSeats(db, 1)[1].id, holdToken: hold.token })).status, 409);
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM reservations').get().count, 1);
     assert.equal((await holds.acquireHold(redis, db, 1, seatId)).status, 409);
   } finally {
@@ -104,7 +106,8 @@ test('concurrent confirmations with one request ID create only one reservation',
   const server = createBookingServer({ database: db, getCache: () => redis });
   await new Promise(resolve => server.listen(0, resolve));
   const origin = `http://localhost:${server.address().port}`;
-  const post = (path, body) => fetch(`${origin}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const { cookie } = await register(origin, 'Asha');
+  const post = (path, body) => fetch(`${origin}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify(body) });
   try {
     const seatId = listSeats(db, 1)[0].id;
     const { hold } = await (await post('/api/holds', { matchId: 1, seatId })).json();
@@ -135,7 +138,8 @@ test('an in-flight duplicate can retry after the first confirmation finishes', a
   } });
   await new Promise(resolve => server.listen(0, resolve));
   const origin = `http://localhost:${server.address().port}`;
-  const post = (path, body) => fetch(`${origin}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const { cookie } = await register(origin, 'Asha');
+  const post = (path, body) => fetch(`${origin}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify(body) });
   try {
     const seatId = listSeats(db, 1)[0].id;
     const { hold } = await (await post('/api/holds', { matchId: 1, seatId })).json();
@@ -151,7 +155,7 @@ test('an in-flight duplicate can retry after the first confirmation finishes', a
     assert.equal(replay.status, 200);
     assert.equal((await replay.json()).replayed, true);
     redis.destroy();
-    assert.equal((await post('/api/reservations', booking)).status, 200);
+    assert.equal((await post('/api/reservations', booking)).status, 503);
   } finally {
     resumeVerification();
     await new Promise(resolve => server.close(resolve));

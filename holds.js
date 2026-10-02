@@ -3,6 +3,7 @@ const { randomUUID } = require('node:crypto');
 const HOLD_SECONDS = 300;
 const CONFIRM_SECONDS = 60;
 const holdKey = (matchId, seatId) => `hold:${matchId}:${seatId}`;
+const ownerValue = (userId, token) => `${userId}:${token}`;
 
 const RELEASE_IF_OWNER = `
   if redis.call('GET', KEYS[1]) == ARGV[1] then
@@ -31,7 +32,7 @@ function seatRecord(db, matchId, seatId) {
     WHERE s.id = ? AND s.match_id = ?`).get(seatId, matchId);
 }
 
-async function acquireHold(client, db, matchId, seatId) {
+async function acquireHold(client, db, matchId, seatId, userId = 0) {
   if (!client?.isReady) return { status: 503, error: 'Seat holds require Redis. Start Redis and restart the app.' };
   const seat = seatRecord(db, matchId, seatId);
   if (!seat) return { status: 404, error: 'Seat not found for this match.' };
@@ -39,12 +40,12 @@ async function acquireHold(client, db, matchId, seatId) {
   const token = randomUUID();
   const expiresAt = new Date(Date.now() + HOLD_SECONDS * 1000).toISOString();
   try {
-    const acquired = await client.set(holdKey(matchId, seatId), token, { NX: true, EX: HOLD_SECONDS });
+    const acquired = await client.set(holdKey(matchId, seatId), ownerValue(userId, token), { NX: true, EX: HOLD_SECONDS });
     if (!acquired) return { status: 409, error: 'This seat is temporarily held by another customer.' };
     // A reservation may have committed between the first SQLite check and SET.
     const latestSeat = seatRecord(db, matchId, seatId);
     if (!latestSeat || latestSeat.reservation_id) {
-      await releaseHold(client, matchId, seatId, token);
+      await releaseHold(client, matchId, seatId, token, userId);
       return { status: 409, error: 'This seat is already reserved.' };
     }
     return { status: 201, hold: { matchId, seatId, token, expiresAt } };
@@ -54,10 +55,10 @@ async function acquireHold(client, db, matchId, seatId) {
   }
 }
 
-async function releaseHold(client, matchId, seatId, token) {
+async function releaseHold(client, matchId, seatId, token, userId = 0) {
   if (!client?.isReady) return { status: 503, error: 'Seat holds are temporarily unavailable.' };
   try {
-    const removed = await client.eval(RELEASE_IF_OWNER, { keys: [holdKey(matchId, seatId)], arguments: [token] });
+    const removed = await client.eval(RELEASE_IF_OWNER, { keys: [holdKey(matchId, seatId)], arguments: [ownerValue(userId, token)] });
     return removed ? { status: 204 } : { status: 409, error: 'This hold has expired or belongs to another request.' };
   } catch (error) {
     console.warn(`Seat hold release failed: ${error.message}`);
@@ -65,11 +66,11 @@ async function releaseHold(client, matchId, seatId, token) {
   }
 }
 
-async function verifyHoldForConfirmation(client, matchId, seatId, token) {
+async function verifyHoldForConfirmation(client, matchId, seatId, token, userId = 0) {
   if (!client?.isReady) return { status: 503, error: 'Seat holds are temporarily unavailable.' };
   try {
     const valid = await client.eval(EXTEND_IF_OWNER, {
-      keys: [holdKey(matchId, seatId)], arguments: [token, String(CONFIRM_SECONDS)]
+      keys: [holdKey(matchId, seatId)], arguments: [ownerValue(userId, token), String(CONFIRM_SECONDS)]
     });
     return valid ? { status: 200 } : { status: 409, error: 'Your seat hold has expired. Select the seat again.' };
   } catch (error) {
@@ -78,11 +79,11 @@ async function verifyHoldForConfirmation(client, matchId, seatId, token) {
   }
 }
 
-async function inspectHold(client, matchId, seatId, token) {
+async function inspectHold(client, matchId, seatId, token, userId = 0) {
   if (!client?.isReady) return { status: 503, error: 'Seat holds are temporarily unavailable.' };
   try {
     const seconds = Number(await client.eval(INSPECT_IF_OWNER, {
-      keys: [holdKey(matchId, seatId)], arguments: [token]
+      keys: [holdKey(matchId, seatId)], arguments: [ownerValue(userId, token)]
     }));
     return seconds > 0
       ? { status: 200, hold: { matchId, seatId, token, expiresAt: new Date(Date.now() + seconds * 1000).toISOString() } }

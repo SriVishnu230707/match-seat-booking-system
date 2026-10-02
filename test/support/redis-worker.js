@@ -10,6 +10,7 @@ async function main() {
   const scoped = {
     get isReady() { return raw.isReady; },
     get: key => raw.get(prefix + key),
+    del: key => raw.del(prefix + key),
     set: (key, value, options) => raw.set(prefix + key, value, options),
     mGet: keys => raw.mGet(keys.map(key => prefix + key)),
     eval: (script, options) => raw.eval(script, { ...options, keys: options.keys.map(key => prefix + key) }),

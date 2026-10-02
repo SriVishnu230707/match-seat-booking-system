@@ -4,18 +4,26 @@ const { server } = require('../server');
 const { createBookingServer } = require('../server');
 const { openDatabase } = require('../db');
 const { createBookingRateLimiter } = require('../rate-limiter');
+const { fakeRedis } = require('./support/fake-redis');
+const { register } = require('./support/auth-client');
 
 test('reservation API returns client errors for malformed bodies', async () => {
-  await new Promise(resolve => server.listen(0, resolve));
-  const url = `http://localhost:${server.address().port}/api/reservations`;
+  const database = openDatabase(':memory:');
+  const isolatedServer = createBookingServer({ database, getCache: () => fake });
+  const fake = fakeRedis();
+  await new Promise(resolve => isolatedServer.listen(0, resolve));
+  const origin = `http://localhost:${isolatedServer.address().port}`;
+  const { cookie } = await register(origin);
+  const url = `${origin}/api/reservations`;
   try {
     for (const [body, expected] of [['null', 400], ['[]', 400], ['{', 400], [JSON.stringify({ matchId: '1', seatId: 1, name: 'A', email: 'a@b.com' }), 400], ['x'.repeat(10_001), 413]]) {
-      const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+      const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body });
       assert.equal(response.status, expected, body.slice(0, 30));
       assert.ok((await response.json()).error);
     }
   } finally {
-    await new Promise(resolve => server.close(resolve));
+    await new Promise(resolve => isolatedServer.close(resolve));
+    database.close();
   }
 });
 
@@ -37,16 +45,18 @@ test('availability responses expose cache state and configured lifetime', async 
 
 test('booking API returns 429 with retry time after five attempts', async () => {
   const database = openDatabase(':memory:');
-  const limitedServer = createBookingServer({ database, getCache: () => null, rateLimiter: createBookingRateLimiter() });
+  const redis = fakeRedis();
+  const limitedServer = createBookingServer({ database, getCache: () => redis, rateLimiter: createBookingRateLimiter() });
   await new Promise(resolve => limitedServer.listen(0, resolve));
   try {
     const origin = `http://localhost:${limitedServer.address().port}`;
+    const { cookie } = await register(origin);
     const url = `${origin}/api/reservations`;
     for (let attempt = 1; attempt <= 6; attempt++) {
-      const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': `fake-client-${attempt}` }, body: '{}' });
+      const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': `fake-client-${attempt}`, Cookie: cookie }, body: '{}' });
       assert.equal(response.status, attempt <= 5 ? 400 : 429);
       assert.equal(response.headers.get('x-ratelimit-remaining'), String(Math.max(0, 5 - attempt)));
-      assert.equal(response.headers.get('x-ratelimit-source'), 'MEMORY');
+      assert.equal(response.headers.get('x-ratelimit-source'), 'REDIS');
       if (attempt === 6) assert.ok(Number(response.headers.get('retry-after')) > 0);
     }
     assert.equal((await fetch(`${origin}/api/matches`)).status, 200);
@@ -58,12 +68,14 @@ test('booking API returns 429 with retry time after five attempts', async () => 
 
 test('booking API does not reserve seats when the shared limiter is unavailable', async () => {
   const database = openDatabase(':memory:');
-  const limitedServer = createBookingServer({ database, getCache: () => null, rateLimiter: { consume: async () => ({ unavailable: true }) } });
+  const redis = fakeRedis();
+  const limitedServer = createBookingServer({ database, getCache: () => redis, rateLimiter: { consume: async () => ({ unavailable: true }) } });
   await new Promise(resolve => limitedServer.listen(0, resolve));
   try {
     const origin = `http://localhost:${limitedServer.address().port}`;
+    const { cookie } = await register(origin);
     const response = await fetch(`${origin}/api/reservations`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
       body: JSON.stringify({ matchId: 1, seatId: 1, name: 'Asha', email: 'asha@example.com' })
     });
     assert.equal(response.status, 503);
@@ -76,16 +88,20 @@ test('booking API does not reserve seats when the shared limiter is unavailable'
 
 test('seat holds fail closed when Redis is unavailable', async () => {
   const database = openDatabase(':memory:');
-  const isolatedServer = createBookingServer({ database, getCache: () => null });
+  const redis = fakeRedis();
+  let active = redis;
+  const isolatedServer = createBookingServer({ database, getCache: () => active });
   await new Promise(resolve => isolatedServer.listen(0, resolve));
   try {
     const origin = `http://localhost:${isolatedServer.address().port}`;
+    const { cookie } = await register(origin);
+    active = null;
     const seatResponse = await fetch(`${origin}/api/matches/1/seats`);
     const { seats, holdsAvailable } = await seatResponse.json();
     assert.equal(holdsAvailable, false);
     assert.equal(seats[0].available, 0);
     const response = await fetch(`${origin}/api/holds`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
       body: JSON.stringify({ matchId: 1, seatId: seats[0].id })
     });
     assert.equal(response.status, 503);

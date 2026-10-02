@@ -7,6 +7,14 @@ function openDatabase(filename = path.join(__dirname, 'data', 'bookings.sqlite')
   const db = new DatabaseSync(filename);
   db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
   db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      email TEXT NOT NULL UNIQUE,
+      password_salt TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
     CREATE TABLE IF NOT EXISTS matches (
       id INTEGER PRIMARY KEY,
       home_team TEXT NOT NULL,
@@ -50,6 +58,13 @@ function openDatabase(filename = path.join(__dirname, 'data', 'bookings.sqlite')
     }
   }
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS reservations_one_per_request ON reservations(request_id)');
+  if (!db.prepare('PRAGMA table_info(reservations)').all().some(column => column.name === 'user_id')) {
+    try { db.exec('ALTER TABLE reservations ADD COLUMN user_id INTEGER REFERENCES users(id)'); }
+    catch (error) {
+      if (!db.prepare('PRAGMA table_info(reservations)').all().some(column => column.name === 'user_id')) throw error;
+    }
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS reservations_by_user ON reservations(user_id, created_at)');
   if (db.prepare('SELECT COUNT(*) AS count FROM matches').get().count === 0) {
     db.exec('BEGIN IMMEDIATE');
     try {
@@ -88,18 +103,25 @@ function listSeats(db, matchId) {
 }
 
 function reservationForRequest(db, requestId) {
-  return db.prepare(`SELECT r.id, r.request_id, r.match_id, r.seat_id, r.created_at, r.customer_name, r.customer_email,
+  return db.prepare(`SELECT r.id, r.request_id, r.user_id, r.match_id, r.seat_id, r.created_at, r.customer_name, r.customer_email,
     s.section, s.row_label, s.seat_number, s.price, m.home_team, m.away_team, m.venue, m.starts_at
     FROM reservations r JOIN seats s ON s.id = r.seat_id JOIN matches m ON m.id = r.match_id WHERE r.request_id = ?`).get(requestId);
 }
 
-function reserveSeat(db, { matchId, seatId, name, email, requestId = null }) {
+function listReservationsForUser(db, userId) {
+  return db.prepare(`SELECT r.id, r.created_at, s.section, s.row_label, s.seat_number, s.price,
+    m.home_team, m.away_team, m.venue, m.starts_at
+    FROM reservations r JOIN seats s ON s.id = r.seat_id JOIN matches m ON m.id = r.match_id
+    WHERE r.user_id = ? ORDER BY r.id DESC`).all(userId);
+}
+
+function reserveSeat(db, { matchId, seatId, name, email, requestId = null, userId = null }) {
   const seat = db.prepare('SELECT id FROM seats WHERE id = ? AND match_id = ?').get(seatId, matchId);
   if (!seat) return { status: 404, error: 'Seat not found for this match.' };
   try {
-    const result = db.prepare('INSERT INTO reservations (match_id, seat_id, customer_name, customer_email, request_id) VALUES (?, ?, ?, ?, ?)')
-      .run(matchId, seatId, name, email, requestId);
-    return { status: 201, reservation: db.prepare(`SELECT r.id, r.request_id, r.match_id, r.seat_id, r.created_at, r.customer_name, r.customer_email,
+    const result = db.prepare('INSERT INTO reservations (match_id, seat_id, customer_name, customer_email, request_id, user_id) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(matchId, seatId, name, email, requestId, userId);
+    return { status: 201, reservation: db.prepare(`SELECT r.id, r.request_id, r.user_id, r.match_id, r.seat_id, r.created_at, r.customer_name, r.customer_email,
       s.section, s.row_label, s.seat_number, s.price, m.home_team, m.away_team, m.venue, m.starts_at
       FROM reservations r JOIN seats s ON s.id = r.seat_id JOIN matches m ON m.id = r.match_id WHERE r.id = ?`)
       .get(Number(result.lastInsertRowid)) };
@@ -109,4 +131,4 @@ function reserveSeat(db, { matchId, seatId, name, email, requestId = null }) {
   }
 }
 
-module.exports = { openDatabase, listMatches, listSeats, reserveSeat, reservationForRequest };
+module.exports = { openDatabase, listMatches, listSeats, reserveSeat, reservationForRequest, listReservationsForUser };

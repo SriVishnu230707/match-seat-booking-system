@@ -13,3 +13,10 @@
 #hold-status { color: #17613b; font-weight: 700; }
 .hold-controls button { border: 1px solid #cbd9ce; border-radius: 8px; background: white; padding: 7px 12px; cursor: pointer; }
 .hold-controls button:disabled { opacity: .5; cursor: not-allowed; }
+#auth-form { grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); }
+#auth-form select { width:100%;padding:12px;border:1px solid #cbd9ce;border-radius:9px;background:white;font:inherit; }
+#account-profile { margin-top:14px; }
+#account-profile h3 { margin:16px 0 8px; }
+#account-profile button { border:1px solid #cbd9ce;border-radius:8px;background:white;padding:8px 12px;cursor:pointer; }
+.booking-item { padding:8px 0;border-bottom:1px solid #e2eae3; }
+[hidden] { display:none !important; }

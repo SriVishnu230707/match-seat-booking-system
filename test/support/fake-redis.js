@@ -14,6 +14,7 @@ function fakeRedis() {
     advance(ms) { time += ms; },
     destroy() { this.isReady = false; },
     async get(key) { return read(key)?.value ?? null; },
+    async del(key) { return entries.delete(key) ? 1 : 0; },
     async mGet(keys) { return keys.map(key => read(key)?.value ?? null); },
     async set(key, value, options) {
       if (options.NX && read(key)) return null;
