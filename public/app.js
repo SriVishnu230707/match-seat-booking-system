@@ -43,7 +43,7 @@ async function api(url, options, cacheLabel) {
   if (typeof cacheLabel === 'function') cacheLabel(response);
   else if (cacheLabel) showCache(cacheLabel, response);
   const data = await response.json();
-  if (!response.ok) throw Object.assign(new Error(data.error || 'Something went wrong.'), { status: response.status });
+  if (!response.ok) throw Object.assign(new Error(data.error || 'Something went wrong.'), { status: response.status, code: data.code });
   return data;
 }
 
@@ -165,7 +165,7 @@ async function holdSeat(match, seat) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ matchId: match.id, seatId: seat.id })
     });
-    setHold(hold);
+    setHold({ ...hold, requestId: crypto.randomUUID() });
     if (currentMatch?.id !== match.id) {
       await cancelCurrentHold();
       return;
@@ -188,7 +188,8 @@ form.addEventListener('submit', async event => {
   bookingBusy = true;
   const button = document.querySelector('#book-button');
   button.disabled = true;
-  const body = { matchId: currentMatch.id, seatId: selectedSeat.id, holdToken: currentHold.token, name: form.elements.name.value, email: form.elements.email.value };
+  const body = { matchId: currentMatch.id, seatId: selectedSeat.id, holdToken: currentHold.token, requestId: currentHold.requestId, name: form.elements.name.value, email: form.elements.email.value };
+  setHold({ ...currentHold, pending: { name: body.name, email: body.email } });
   try {
     const { reservation } = await api('/api/reservations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, showRateLimit);
     const confirmation = `Booked! Reservation #${reservation.id}: ${reservation.section} ${reservation.row_label}${reservation.seat_number}.`;
@@ -199,10 +200,14 @@ form.addEventListener('submit', async event => {
     const matchesRefreshOk = await loadMatches();
     message(seatRefreshOk && matchesRefreshOk ? confirmation : `${confirmation} Availability could not be refreshed; reload the page.`, 'success');
   } catch (error) {
-    if (error.status === 409) { setHold(null); selectedSeat = null; }
-    button.disabled = false;
-    await chooseMatch(currentMatch);
-    message(error.message, 'error');
+    if (error.code === 'HOLD_EXPIRED' || error.code === 'SEAT_RESERVED') {
+      setHold(null);
+      selectedSeat = null;
+      await chooseMatch(currentMatch);
+    } else {
+      button.disabled = false;
+    }
+    message(error.status ? error.message : 'Confirmation response was lost. Retry with the same request ID to check the booking.', 'error');
   } finally {
     bookingBusy = false;
   }
@@ -238,19 +243,36 @@ refreshButton.addEventListener('click', async () => {
 });
 
 async function restoreHold() {
+  let completed = null;
   try {
     const saved = JSON.parse(sessionStorage.getItem('cricket-seat-hold'));
     if (saved && Number.isSafeInteger(saved.matchId) && Number.isSafeInteger(saved.seatId) && typeof saved.token === 'string') {
-      const { hold } = await api('/api/holds/check', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ matchId: saved.matchId, seatId: saved.seatId, token: saved.token })
-      });
-      setHold(hold);
+      if (saved.requestId) {
+        try {
+          completed = (await api('/api/reservations/status', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ requestId: saved.requestId })
+          })).reservation;
+        } catch (error) { if (error.status !== 404) throw error; }
+      }
+      if (completed) setHold(null);
+      else {
+        const { hold } = await api('/api/holds/check', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ matchId: saved.matchId, seatId: saved.seatId, token: saved.token })
+        });
+        setHold({ ...hold, requestId: saved.requestId || crypto.randomUUID(), pending: saved.pending });
+        if (saved.pending) {
+          form.elements.name.value = saved.pending.name || '';
+          form.elements.email.value = saved.pending.email || '';
+        }
+      }
     }
   } catch (error) {
     if (error.status !== 503) setHold(null);
   }
   await loadMatches();
+  if (completed) message(`Booked! Reservation #${completed.id}: ${completed.section} ${completed.row_label}${completed.seat_number}.`, 'success');
 }
 
 restoreHold();

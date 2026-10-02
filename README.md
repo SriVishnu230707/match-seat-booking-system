@@ -1,6 +1,6 @@
-# Cricket Match Seat Booking System — Phase 4
+# Cricket Match Seat Booking System — Phase 5
 
-A small seat reservation app built with Node.js, SQLite, and Redis. SQLite stores confirmed bookings. Redis caches availability, limits requests, and holds seats temporarily during checkout.
+A small seat reservation app built with Node.js, SQLite, and Redis. SQLite stores confirmed bookings. Redis caches availability, limits requests, holds seats temporarily, and coordinates confirmation retries.
 
 ## Run
 
@@ -63,7 +63,7 @@ Click **Check availability again** twice, wait 10 seconds, then click again. The
 
 ## Phase 3 rate limiting
 
-- `POST /api/reservations` allows 5 attempts per client IP in a 60-second window. Invalid requests also count.
+- `POST /api/reservations` allows 5 new attempts per client IP in a 60-second window. Valid retries of an already completed request return the saved result without consuming another attempt. Malformed JSON and requests with the wrong content type are rejected before the counter.
 - Redis stores `ratelimit:booking:<hashed IP>` and atomically increments the counter and sets its expiry with a Lua script. This prevents concurrent requests from escaping the limit.
 - The sixth attempt receives HTTP 429, a `Retry-After` header, and a clear message. The page shows remaining attempts and whether Redis or the local fallback counted them.
 - The server uses the socket address rather than an untrusted `X-Forwarded-For` header. Users sharing a public IP also share the limit. A future login system can provide a better identity.
@@ -83,6 +83,16 @@ To inspect a Redis counter after making a booking attempt, use `SCAN 0 MATCH rat
 
 To inspect a hold, run `GET hold:1:1` and `TTL hold:1:1` in `redis-cli` after selecting seat ID 1. Treat the returned token as private.
 
+## Phase 5 safe confirmation retries
+
+- The browser creates one UUID request ID per hold and reuses it for every confirmation retry. It saves pending name and email in tab session storage so a refresh can restore the attempt.
+- SQLite stores the request ID with the confirmed reservation and enforces uniqueness. A retry returns the original reservation with HTTP 200 and `replayed: true`; a different booking using the same ID receives HTTP 409.
+- Redis uses `SET confirmation:<requestId>:lock <token> NX EX 30` to coordinate confirmations in flight. A second request receives HTTP 409 with `code: PROCESSING` and can retry. A token-checked script releases the lock; expiry handles a crashed worker.
+- SQLite's unique indexes remain the final protection if a Redis lock expires during a slow request or several server processes race. Completed retries still work if Redis later becomes unavailable because the confirmed result is in SQLite.
+- On page refresh, the browser checks the saved request ID for a completed reservation before trying to restore the seat hold. Keep the request ID private: it can retrieve a limited confirmation summary in this learning app.
+
+To inspect a confirmation lock while a request is in flight, use `SCAN 0 MATCH confirmation:*:lock`, then `TTL` on the returned key. Normal confirmations may finish too quickly to observe the key manually.
+
 ## API
 
 | Method | Path | Purpose |
@@ -92,12 +102,13 @@ To inspect a hold, run `GET hold:1:1` and `TTL hold:1:1` in `redis-cli` after se
 | POST | `/api/holds` | Hold a seat for five minutes |
 | POST | `/api/holds/check` | Check ownership and remaining hold time |
 | DELETE | `/api/holds` | Cancel a hold using its token |
+| POST | `/api/reservations/status` | Recover a completed confirmation by request ID |
 | POST | `/api/reservations` | Confirm a held seat |
 
 Example request:
 
 ```json
-{"matchId":1,"seatId":1,"holdToken":"token-from-the-hold-response","name":"Asha","email":"asha@example.com"}
+{"matchId":1,"seatId":1,"holdToken":"token-from-the-hold-response","requestId":"36d72be9-9ce7-4a47-a6c0-f21a4981576c","name":"Asha","email":"asha@example.com"}
 ```
 
 This learning project does not have accounts or payments yet. The hold token is a bearer token; anyone with it can act on that hold. SQLite decides whether a reservation succeeds.
